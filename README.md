@@ -1,6 +1,4 @@
-# local-k8s
-
-## Local clusters for Kubernetes testing
+# Local Clusters for Kubernetes Testing
 
 #### Run Kubernetes IN Docker
 

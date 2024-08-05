@@ -1,8 +1,8 @@
 # local-k8s
 
-## Deploy Local K8s cluster
+## Local clusters for Kubernetes testing
 
-#### Deploy local k8s with `Kind`
+#### Run Kubernetes IN Docker
 
 ```
 cat <<EOF | kind create cluster --name blue --config=-
@@ -15,7 +15,7 @@ networking:
   podSubnet: "10.5.0.0/24"
 
 EOF
-cat <<EOF | kind create cluster --name blue --config=-
+cat <<EOF | kind create cluster --name green --config=-
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 nodes:
@@ -33,7 +33,7 @@ kubectl config use-context green
 
 OR 
 
-#### Deploy local k8s with `Talos`
+#### Run `Talos` Kubernetes in Docker
 
 ```
 talosctl cluster create --name blue --cidr 10.5.0.0/24

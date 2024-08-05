@@ -1,6 +1,6 @@
 # Local Clusters for Kubernetes Testing
 
-### Run Kubernetes IN Docker
+## Run Kubernetes IN Docker
 
 ```
 cat <<EOF | kind create cluster --name blue --config=-
@@ -31,7 +31,7 @@ kubectl config use-context green
 
 OR 
 
-## Run `Talos` Kubernetes in Docker
+## Run Talos Kubernetes in Docker
 
 ```
 talosctl cluster create --name blue --cidr 10.5.0.0/24

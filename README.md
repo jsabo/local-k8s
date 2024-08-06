@@ -24,11 +24,6 @@ networking:
 EOF
 ```
 
-```
-kubectl config use-context blue
-kubectl config use-context green
-```
-
 OR 
 
 ## Run Talos Kubernetes in Docker
@@ -38,8 +33,11 @@ talosctl cluster create --name blue --cidr 10.5.0.0/24
 talosctl cluster create --name green --cidr 10.6.0.0/24
 ```
 
-```
-kubectl config use-context admin@blue
-kubectl config use-context admin@green
-```
+## Install Stars Demo App
 
+```
+kubectl --context admin@green apply -f apps
+kubectl --context admin@blue apply -f apps
+kubectl --context admin@green get service management-ui -n management-ui -o=jsonpath='{.spec.ports[0].nodePort}'
+kubectl --context admin@blue get service management-ui -n management-ui -o=jsonpath='{.spec.ports[0].nodePort}'
+```

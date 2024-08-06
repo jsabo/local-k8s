@@ -36,8 +36,8 @@ talosctl cluster create --name green --cidr 10.6.0.0/24
 ## Install Stars Demo App
 
 ```
-kubectl --context admin@green apply -f apps
-kubectl --context admin@blue apply -f apps
+kubectl --context admin@green apply -f app
+kubectl --context admin@blue apply -f app
 kubectl --context admin@green get service management-ui -n management-ui -o=jsonpath='{.spec.ports[0].nodePort}'
 kubectl --context admin@blue get service management-ui -n management-ui -o=jsonpath='{.spec.ports[0].nodePort}'
 ```

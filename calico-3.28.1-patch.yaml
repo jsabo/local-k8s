@@ -1,0 +1,7 @@
+cluster:
+  network:
+    cni:
+      name: custom
+      urls: 
+        - https://raw.githubusercontent.com/projectcalico/calico/v3.28.1/manifests/tigera-operator.yaml
+        - https://raw.githubusercontent.com/projectcalico/calico/v3.28.1/manifests/custom-resources.yaml

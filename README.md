@@ -11,9 +11,8 @@ brew install siderolabs/tap/talosctl
 ### Create the clusters
 
 ```
-talosctl cluster create
-talosctl cluster create --name calico --cidr 10.5.0.0/24
-talosctl cluster create --name cilium --cidr 10.6.0.0/24
+talosctl cluster create --config-patch @calico-3.28.1-patch.yaml
+talosctl cluster create --name calico --cidr 10.6.0.0/24 --config-patch @calico-3.28.1-custom-patch.yaml
 ```
 
 ### FAQ

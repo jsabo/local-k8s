@@ -8,22 +8,29 @@
 brew install siderolabs/tap/talosctl
 ```
 
-### Create a Talos Kubernetes cluster
+### Create cluster
 
-Talos and Calico default settings
+Talos with Calico default settings
 
 ```
-talosctl cluster create --config-patch @calico-3.28.1-patch.yaml
+talosctl cluster create --config-patch-control-plane @controlplane.yaml --config-patch-worker @worker.yaml
 talosctl cluster show
 kubectl get tigerastatus --context admin@talos-default
 ```
 
-Talos and Calico custom settings
+Talos with Calico custom settings
 
 ```
-talosctl cluster create --name calico --cidr 10.6.0.0/24 --config-patch @calico-3.28.1-custom-patch.yaml
+talosctl cluster create --name calico --cidr 10.6.0.0/24 --config-patch-control-plane @controlplane-custom.yaml --config-patch-worker @worker-custom.yaml
 talosctl cluster show --name calico
 kubectl get tigerastatus --context admin@calico
+```
+
+### Delete cluster
+
+```
+talosctl cluster destroy
+talosctl cluster destroy --name calico
 ```
 
 ### FAQ

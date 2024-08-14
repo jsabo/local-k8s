@@ -15,6 +15,7 @@ Talos and Calico default settings
 ```
 talosctl cluster create --config-patch @calico-3.28.1-patch.yaml
 talosctl cluster show
+kubectl get nodes --context admin@talos-default
 ```
 
 Talos and Calico custom settings
@@ -22,6 +23,7 @@ Talos and Calico custom settings
 ```
 talosctl cluster create --name calico --cidr 10.6.0.0/24 --config-patch @calico-3.28.1-custom-patch.yaml
 talosctl cluster show --name calico
+kubectl get nodes --context admin@calico
 ```
 
 ### FAQ

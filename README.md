@@ -1,6 +1,6 @@
 # Local Clusters for Kubernetes Testing
 
-## Creating Talos in Docker Kubernetes clusters
+## Create Talos in Docker Kubernetes clusters
 
 ### Install the Talos CLI
 
@@ -8,11 +8,20 @@
 brew install siderolabs/tap/talosctl
 ```
 
-### Create the clusters
+### Create a Talos Kubernetes cluster
+
+Talos and Calico default settings
 
 ```
 talosctl cluster create --config-patch @calico-3.28.1-patch.yaml
+talosctl cluster show
+```
+
+Talos and Calico custom settings
+
+```
 talosctl cluster create --name calico --cidr 10.6.0.0/24 --config-patch @calico-3.28.1-custom-patch.yaml
+talosctl cluster show --name calico
 ```
 
 ### FAQ
@@ -30,11 +39,15 @@ $ docker ps -a
 CONTAINER ID   IMAGE                             COMMAND        CREATED      STATUS                        PORTS     NAMES
 e01809686f0e   ghcr.io/siderolabs/talos:v1.7.5   "/sbin/init"   4 days ago   Exited (137) 24 seconds ago             blue-worker-1
 ea2fe178d0b0   ghcr.io/siderolabs/talos:v1.7.5   "/sbin/init"   4 days ago   Exited (137) 24 seconds ago             blue-controlplane-1
+```
 
+```
 $ docker start e01809686f0e ea2fe178d0b0
 e01809686f0e
 ea2fe178d0b0
+```
 
+```
 $ docker ps
 CONTAINER ID   IMAGE                             COMMAND        CREATED      STATUS         PORTS                                               NAMES
 e01809686f0e   ghcr.io/siderolabs/talos:v1.7.5   "/sbin/init"   4 days ago   Up 7 seconds                                                       blue-worker-1

@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  name: talos-api-access
+spec:
+  selector:
+    matchLabels:
+      app: talos-api-access
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: talos-api-access
+    spec:
+      containers:
+      - command:
+        - sh
+        - -c
+        - |
+          wget -O /usr/local/bin/talosctl https://github.com/siderolabs/talos/releases/download/v1.7.6/talosctl-linux-amd64
+          chmod +x /usr/local/bin/talosctl
+          while true; talosctl -n 10.5.0.2 version; do sleep 1; done
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+        image: alpine:3
+        name: talos-api-access
+        resources: {}
+        volumeMounts:
+        - mountPath: /var/run/secrets/talos.dev
+          name: talos-secrets
+      volumes:
+      - name: talos-secrets
+        secret:
+          secretName: talos-api-access-talos-secrets
+status: {}
+---
+apiVersion: talos.dev/v1alpha1
+kind: ServiceAccount
+metadata:
+    name: talos-api-access-talos-secrets
+spec:
+    roles:
+        - os:reader
+---
+

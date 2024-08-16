@@ -1,3 +1,4 @@
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -37,14 +38,11 @@ spec:
       - name: talos-secrets
         secret:
           secretName: talos-api-access-talos-secrets
-status: {}
 ---
 apiVersion: talos.dev/v1alpha1
 kind: ServiceAccount
 metadata:
-    name: talos-api-access-talos-secrets
+  name: talos-api-access-talos-secrets
 spec:
-    roles:
-        - os:reader
----
-
+  roles:
+    - os:reader

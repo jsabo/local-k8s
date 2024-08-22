@@ -1,0 +1,44 @@
+cluster:
+  network:
+    cni:
+      name: custom
+      urls: 
+        - https://raw.githubusercontent.com/projectcalico/calico/v3.28.1/manifests/tigera-operator.yaml
+  inlineManifests:
+    - name: calico
+      contents: |
+        ---
+        # This section includes base Calico installation configuration.
+        # For more information, see: https://docs.tigera.io/calico/latest/reference/installation/api#operator.tigera.io/v1.Installation
+        apiVersion: operator.tigera.io/v1
+        kind: Installation
+        metadata:
+          name: default
+        spec:
+          # Configures Calico networking.
+          calicoNetwork:
+            #linuxDataplane: BPF
+            ipPools:
+            - name: default-ipv4-ippool
+              blockSize: 26
+              cidr: 10.69.0.0/16
+              encapsulation: VXLAN
+              natOutgoing: Enabled
+              nodeSelector: all()
+        ---
+        # This section configures the Calico API server.
+        # For more information, see: https://docs.tigera.io/calico/latest/reference/installation/api#operator.tigera.io/v1.APIServer
+        apiVersion: operator.tigera.io/v1
+        kind: APIServer
+        metadata:
+          name: default
+        spec: {}
+        ---
+        kind: ConfigMap
+        apiVersion: v1
+        metadata:
+          name: kubernetes-services-endpoint
+          namespace: tigera-operator
+        data:
+          KUBERNETES_SERVICE_HOST: "localhost"
+          KUBERNETES_SERVICE_PORT: "6443"

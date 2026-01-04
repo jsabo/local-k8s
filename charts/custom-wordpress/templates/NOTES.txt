@@ -1,0 +1,22 @@
+1) Get the WordPress URL (for port-forward access):
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "custom-wordpress.fullname" . }} 8080:{{ .Values.wordpress.service.port }}
+
+   Then open:
+   http://127.0.0.1:8080
+
+2) MySQL service inside the cluster:
+   {{ include "custom-wordpress.fullname" . }}-mysql:{{ .Values.mysql.service.port }}
+
+3) PVCs created (if enabled):
+   - {{ include "custom-wordpress.fullname" . }}-wp
+   - {{ include "custom-wordpress.fullname" . }}-mysql
+
+4) Database credentials (stored in a Secret):
+   Secret: {{ include "custom-wordpress.fullname" . }}-db
+
+   Print the generated passwords:
+   kubectl -n {{ .Release.Namespace }} get secret {{ include "custom-wordpress.fullname" . }}-db \
+     -o jsonpath='{.data.mysql-root-password}' | base64 -d; echo
+
+   kubectl -n {{ .Release.Namespace }} get secret {{ include "custom-wordpress.fullname" . }}-db \
+     -o jsonpath='{.data.wordpress-password}' | base64 -d; echo

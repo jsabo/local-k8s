@@ -1,0 +1,240 @@
+#cloud-config
+---
+package_update: true
+package_upgrade: true
+
+users:
+  # Default multipass user; passwordless sudo for demo automation.
+  - name: ubuntu
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    ssh-authorized-keys:
+      - ${ssh_key}
+    lock-passwd: true
+    shell: /bin/bash
+
+# SSH keys only; no passwords and no root login.
+ssh_pwauth: false
+disable_root: true
+
+packages:
+  # Base deps + container runtime.
+  - apt-transport-https
+  - ca-certificates
+  - curl
+  - gpg
+  - containerd
+
+write_files:
+  # Kernel modules required for Kubernetes networking.
+  - path: /etc/modules-load.d/k8s.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      overlay
+      br_netfilter
+
+  # Sysctls required by kube-proxy/CNI for forwarding and bridged traffic.
+  - path: /etc/sysctl.d/k8s.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      net.bridge.bridge-nf-call-iptables  = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.ipv4.ip_forward                 = 1
+
+  # Kubernetes audit policy (demo-friendly):
+  # - Default to Metadata (safe baseline).
+  # - Capture most writes at RequestResponse for “who changed what”.
+  # - Drop common high-volume noise (health/discovery, watch/events, leases, read chatter).
+  # - Drop selected controller/operator reconcile loops that spam updates/patches.
+  # - Never log Secret/ConfigMap contents (Metadata only).
+  - path: /etc/kubernetes/audit-policy.yaml
+    owner: root:root
+    permissions: '0644'
+    content: |
+      apiVersion: audit.k8s.io/v1
+      kind: Policy
+      rules:
+        # Non-resource endpoints (health + discovery noise).
+        - level: None
+          nonResourceURLs:
+            - /healthz*
+            - /livez*
+            - /readyz*
+            - /version
+            - /metrics
+            - /api
+            - /apis
+            - /openapi*
+            - /swagger*
+
+        # High-volume patterns.
+        - level: None
+          verbs: ["watch"]
+
+        - level: None
+          resources:
+            - group: ""
+              resources: ["events"]
+
+        # Leader election churn.
+        - level: None
+          verbs: ["get", "list", "watch", "update", "patch"]
+          resources:
+            - group: "coordination.k8s.io"
+              resources: ["leases"]
+
+        # Control-plane background reads that add little demo value.
+        - level: None
+          users: ["system:apiserver"]
+          verbs: ["get"]
+          resources:
+            - group: ""
+              resources: ["endpoints"]
+              resourceNames: ["kubernetes"]
+            - group: "discovery.k8s.io"
+              resources: ["endpointslices"]
+              resourceNames: ["kubernetes"]
+
+        - level: None
+          users: ["system:apiserver"]
+          verbs: ["list"]
+          resources:
+            - group: ""
+              resources: ["services"]
+
+        # Read-only chatter from serviceaccounts/nodes (writes are handled below).
+        - level: None
+          userGroups: ["system:serviceaccounts"]
+          verbs: ["get", "list", "watch"]
+
+        - level: None
+          userGroups: ["system:nodes"]
+          verbs: ["get", "list", "watch"]
+
+        # Delegated auth spam (TokenReviews / SubjectAccessReviews).
+        - level: None
+          userGroups: ["system:serviceaccounts", "system:nodes"]
+          verbs: ["create"]
+          resources:
+            - group: "authorization.k8s.io"
+              resources: ["subjectaccessreviews"]
+            - group: "authentication.k8s.io"
+              resources: ["tokenreviews"]
+
+        # Ingress controller status updates (keep spec changes).
+        - level: None
+          users: ["system:serviceaccount:ingress-nginx:ingress-nginx"]
+          verbs: ["update", "patch"]
+          resources:
+            - group: "networking.k8s.io"
+              resources: ["ingresses/status"]
+
+        # Calico controller tier ensure-loop noise.
+        - level: None
+          users: ["system:serviceaccount:calico-system:calico-kube-controllers"]
+          verbs: ["create", "update", "patch"]
+          resources:
+            - group: "crd.projectcalico.org"
+              resources: ["tiers"]
+
+        # Kubelet node status heartbeats/conditions.
+        - level: None
+          userGroups: ["system:nodes"]
+          verbs: ["update", "patch"]
+          resources:
+            - group: ""
+              resources: ["nodes/status"]
+
+        # Tigera operator reconcile noise (drop for demo clarity).
+        - level: None
+          users: ["system:serviceaccount:tigera-operator:tigera-operator"]
+          verbs: ["update", "patch"]
+          resources:
+            - group: "operator.tigera.io"
+              resources:
+                - "installations"
+                - "installations/status"
+                - "apiservers"
+                - "apiservers/status"
+              resourceNames: ["default"]
+
+        # Never log Secret/ConfigMap contents.
+        - level: Metadata
+          resources:
+            - group: ""
+              resources: ["secrets", "configmaps"]
+
+        # Writes: capture full request/response (except RequestReceived stage).
+        - level: RequestResponse
+          verbs: ["create", "update", "patch", "delete", "deletecollection"]
+          omitStages:
+            - "RequestReceived"
+
+        # Baseline: Metadata for everything else.
+        - level: Metadata
+          omitStages:
+            - "RequestReceived"
+
+  # kubeadm config: rendered by Taskfile via envsubst before VM launch.
+  - path: /etc/kubernetes/kubeadm-config.yaml
+    owner: root:root
+    permissions: '0644'
+    content: |
+      apiVersion: kubeadm.k8s.io/v1beta4
+      kind: InitConfiguration
+      localAPIEndpoint:
+        advertiseAddress: __CP0_ADVERTISE_ADDRESS__
+        bindPort: 6443
+      nodeRegistration:
+        criSocket: unix:///run/containerd/containerd.sock
+      ---
+      apiVersion: kubeadm.k8s.io/v1beta4
+      kind: ClusterConfiguration
+      kubernetesVersion: v${kubernetes_version_full}
+      clusterName: k8s
+      networking:
+        serviceSubnet: ${service_cidr}
+        podSubnet: ${pod_cidr}
+        dnsDomain: ${dns_domain}
+
+      # Audit logging to apiserver stdout (easy to tail via kube-apiserver pod logs).
+      apiServer:
+        extraArgs:
+          - name: audit-policy-file
+            value: /etc/kubernetes/audit-policy.yaml
+          - name: audit-log-path
+            value: "-"
+        extraVolumes:
+          - name: audit-policy
+            hostPath: /etc/kubernetes/audit-policy.yaml
+            mountPath: /etc/kubernetes/audit-policy.yaml
+            readOnly: true
+            pathType: File
+
+runcmd:
+  # Kernel + sysctl setup.
+  - [ modprobe, overlay ]
+  - [ modprobe, br_netfilter ]
+  - [ sysctl, --system ]
+
+  # Kubernetes requires swap off.
+  - [ swapoff, -a ]
+  - sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+
+  # Install Kubernetes packages from pkgs.k8s.io (versioned by ${kubernetes_version}).
+  - [ mkdir, -p, -m, "755", /etc/apt/keyrings ]
+  - bash -c "curl -fsSL https://pkgs.k8s.io/core:/stable:/v${kubernetes_version}/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg"
+  - bash -c "echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${kubernetes_version}/deb/ /' > /etc/apt/sources.list.d/kubernetes.list"
+  - apt-get update
+  - apt-get install -y kubelet kubeadm kubectl
+  - apt-mark hold kubelet kubeadm kubectl
+
+  # Configure containerd for kubelet (systemd cgroups + pinned pause image).
+  - mkdir -p /etc/containerd
+  - bash -c "containerd config default > /etc/containerd/config.toml"
+  - sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+  - sed -i -E 's#(^[[:space:]]*sandbox_image[[:space:]]*=[[:space:]]*\").*(\"$)#\1registry.k8s.io/pause:3.10.1\2#' /etc/containerd/config.toml
+  - systemctl enable containerd
+  - systemctl restart containerd
+

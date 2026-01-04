@@ -1,0 +1,18 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: wp-accessor
+subjects:
+  # Option A: group-based binding (recommended)
+  - kind: Group
+    name: wp-accessors
+    apiGroup: rbac.authorization.k8s.io
+
+  # Option B: user-based binding (uncomment and set a real username)
+  # - kind: User
+  #   name: alex.accessor
+  #   apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: wp-accessor
+  apiGroup: rbac.authorization.k8s.io

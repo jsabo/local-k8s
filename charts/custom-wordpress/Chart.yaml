@@ -1,0 +1,6 @@
+apiVersion: v2
+name: custom-wordpress
+description: A minimal, custom WordPress + MySQL deployment (for kubeadm clusters) with PVC-backed storage.
+type: application
+version: 0.2.0
+appVersion: "6.4.3"

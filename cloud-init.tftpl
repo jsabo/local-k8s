@@ -42,12 +42,13 @@ write_files:
       net.bridge.bridge-nf-call-ip6tables = 1
       net.ipv4.ip_forward                 = 1
 
-  # Kubernetes audit policy (demo-friendly):
+  # Kubernetes audit policy (demo-friendly + token-safe):
   # - Default to Metadata (safe baseline).
   # - Capture most writes at RequestResponse for “who changed what”.
   # - Drop common high-volume noise (health/discovery, watch/events, leases, read chatter).
   # - Drop selected controller/operator reconcile loops that spam updates/patches.
   # - Never log Secret/ConfigMap contents (Metadata only).
+  # - Never log bearer tokens: keep TokenReview + TokenRequest at Metadata (no request/response bodies).
   - path: /etc/kubernetes/audit-policy.yaml
     owner: root:root
     permissions: '0644'
@@ -112,7 +113,7 @@ write_files:
           userGroups: ["system:nodes"]
           verbs: ["get", "list", "watch"]
 
-        # Delegated auth spam (TokenReviews / SubjectAccessReviews).
+        # Delegated auth spam (TokenReviews / SubjectAccessReviews) from cluster identities.
         - level: None
           userGroups: ["system:serviceaccounts", "system:nodes"]
           verbs: ["create"]
@@ -121,6 +122,26 @@ write_files:
               resources: ["subjectaccessreviews"]
             - group: "authentication.k8s.io"
               resources: ["tokenreviews"]
+
+        # --- Token safety rules ---
+        # If *any* TokenReview gets logged, keep it at Metadata so bearer tokens in the requestObject
+        # (and any echoed responseObject) are never written to the audit log.
+        - level: Metadata
+          verbs: ["create"]
+          resources:
+            - group: "authentication.k8s.io"
+              resources: ["tokenreviews"]
+          omitStages:
+            - "RequestReceived"
+
+        # TokenRequest subresource returns a token in the response; never log request/response bodies.
+        - level: Metadata
+          verbs: ["create"]
+          resources:
+            - group: ""
+              resources: ["serviceaccounts/token"]
+          omitStages:
+            - "RequestReceived"
 
         # Ingress controller status updates (keep spec changes).
         - level: None
@@ -164,17 +185,21 @@ write_files:
           resources:
             - group: ""
               resources: ["secrets", "configmaps"]
+          omitStages:
+            - "RequestReceived"
 
         # Writes: capture full request/response (except RequestReceived stage).
         - level: RequestResponse
           verbs: ["create", "update", "patch", "delete", "deletecollection"]
           omitStages:
             - "RequestReceived"
+          omitManagedFields: true
 
         # Baseline: Metadata for everything else.
         - level: Metadata
           omitStages:
             - "RequestReceived"
+          omitManagedFields: true
 
   # kubeadm config: rendered by Taskfile via envsubst before VM launch.
   - path: /etc/kubernetes/kubeadm-config.yaml

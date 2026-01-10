@@ -39,6 +39,13 @@ vars:
   CLOUD_INIT_TEMPLATE: '{{.TASKFILE_DIR}}/cloud-init.tftpl'
   CLOUD_INIT_RENDERED: '{{.STATE_DIR}}/cloud-init.yaml'
 
+  AUDIT_POLICY_TEMPLATE: '{{.TASKFILE_DIR}}/audit-policy.tftpl'
+  AUDIT_POLICY_RENDERED: '{{.STATE_DIR}}/audit-policy.yaml'
+
+  # kubeadm config is now managed outside cloud-init (like audit-policy)
+  KUBEADM_CONFIG_TEMPLATE: '{{.TASKFILE_DIR}}/kubeadm-config.tftpl'
+  KUBEADM_CONFIG_RENDERED: '{{.STATE_DIR}}/kubeadm-config.yaml'
+
   KUBECONFIG_OUT: '{{.STATE_DIR}}/kubeconfig'
   ENV_OUT: '{{.STATE_DIR}}/env'
 
@@ -99,11 +106,7 @@ vars:
 
   # Hostname-per-app (derived from INGRESS_HOST)
   WP_HOST: 'wp.{{.INGRESS_HOST}}'
-  GOAPI_HOST: 'api.{{.INGRESS_HOST}}'
   DASHBOARD_HOST: 'dashboard.{{.INGRESS_HOST}}'
-
-  GOAPI_NAME: '{{default "goapi" .GOAPI_NAME}}'
-  GOAPI_IMAGE: '{{default "traefik/whoami:v1.10.1" .GOAPI_IMAGE}}'
 
 tasks:
   # =====================================================================
@@ -202,7 +205,6 @@ tasks:
         echo
         echo "Base domain: {{.INGRESS_HOST}}"
         echo "• WordPress:  http://{{.WP_HOST}}:{{.INGRESS_NODEPORT_HTTP}}/"
-        echo "• Go API:     http://{{.GOAPI_HOST}}:{{.INGRESS_NODEPORT_HTTP}}/"
         echo "• Dashboard:  https://{{.DASHBOARD_HOST}}:{{.INGRESS_NODEPORT_HTTPS}}/"
         echo
         echo 'Dashboard token:'
@@ -212,7 +214,6 @@ tasks:
         CP0_IP="$(multipass list --format csv | awk -F, -v n='{{.CP0}}' '$1==n {print $3; exit}')"
         test -n "${CP0_IP:-}"
         echo "${CP0_IP} {{.WP_HOST}}"
-        echo "${CP0_IP} {{.GOAPI_HOST}}"
         echo "${CP0_IP} {{.DASHBOARD_HOST}}"
 
   # -------------------------------------------------------------------
@@ -427,81 +428,6 @@ tasks:
         rm -f '{{.DASHBOARD_STAMP}}' >/dev/null 2>&1 || true
         echo '✓ dashboard removed (best-effort)'
 
-  apps:goapi:install:
-    internal: true
-    silent: true
-    desc: 'Install stub Go API (whoami)'
-    deps: [cluster:ready]
-    cmds:
-      - |
-        set -euo pipefail
-
-        if [ ! -s '{{.WP_DEPLOYER_KUBECONFIG}}' ]; then
-          task -s wp:user:deployer
-        fi
-
-        export KUBECONFIG='{{.WP_DEPLOYER_KUBECONFIG}}'
-
-        kubectl -n '{{.WP_NS}}' apply -f - <<EOF
-        apiVersion: apps/v1
-        kind: Deployment
-        metadata:
-          name: {{.GOAPI_NAME}}
-          labels:
-            app.kubernetes.io/name: {{.GOAPI_NAME}}
-            app.kubernetes.io/part-of: custom-wordpress
-        spec:
-          replicas: 1
-          selector:
-            matchLabels:
-              app.kubernetes.io/name: {{.GOAPI_NAME}}
-          template:
-            metadata:
-              labels:
-                app.kubernetes.io/name: {{.GOAPI_NAME}}
-                app.kubernetes.io/part-of: custom-wordpress
-            spec:
-              containers:
-                - name: {{.GOAPI_NAME}}
-                  image: {{.GOAPI_IMAGE}}
-                  ports:
-                    - name: http
-                      containerPort: 80
-        ---
-        apiVersion: v1
-        kind: Service
-        metadata:
-          name: {{.GOAPI_NAME}}
-          labels:
-            app.kubernetes.io/name: {{.GOAPI_NAME}}
-            app.kubernetes.io/part-of: custom-wordpress
-        spec:
-          type: ClusterIP
-          ports:
-            - name: http
-              port: 80
-              targetPort: http
-          selector:
-            app.kubernetes.io/name: {{.GOAPI_NAME}}
-        EOF
-
-        kubectl -n '{{.WP_NS}}' rollout status deploy/{{.GOAPI_NAME}} --timeout=180s >/dev/null
-
-        echo '✓ goapi installed'
-        kubectl -n '{{.WP_NS}}' get deploy,svc '{{.GOAPI_NAME}}' -o wide
-
-  apps:goapi:uninstall:
-    internal: true
-    silent: true
-    desc: 'Remove stub Go API'
-    deps: [cluster:ready]
-    cmds:
-      - |
-        set -euo pipefail
-        export KUBECONFIG='{{.KUBECONFIG_OUT}}'
-        kubectl -n '{{.WP_NS}}' delete deploy,svc '{{.GOAPI_NAME}}' >/dev/null 2>&1 || true
-        echo '✓ goapi removed (best-effort)'
-
   apps:wp:up:
     internal: true
     silent: true
@@ -556,6 +482,8 @@ tasks:
         need head
         need envsubst
         test -f '{{.CLOUD_INIT_TEMPLATE}}' || { echo "missing: {{.CLOUD_INIT_TEMPLATE}}" >&2; exit 1; }
+        test -f '{{.AUDIT_POLICY_TEMPLATE}}' || { echo "missing: {{.AUDIT_POLICY_TEMPLATE}}" >&2; exit 1; }
+        test -f '{{.KUBEADM_CONFIG_TEMPLATE}}' || { echo "missing: {{.KUBEADM_CONFIG_TEMPLATE}}" >&2; exit 1; }
 
   cluster:render:
     internal: true
@@ -579,15 +507,36 @@ tasks:
         K8S_MINOR='{{.K8S_VERSION_FULL}}'
         K8S_MINOR="${K8S_MINOR%.*}"
 
-        export ssh_key="$SSH_KEY"
+        # Export variables used by rendered templates
         export kubernetes_version_full='{{.K8S_VERSION_FULL}}'
         export kubernetes_version="$K8S_MINOR"
         export pod_cidr='{{.POD_CIDR}}'
         export service_cidr='{{.SERVICE_CIDR}}'
         export dns_domain='{{.DNS_DOMAIN}}'
 
+        # Render the audit policy to a readable artifact in .state/
+        cp '{{.AUDIT_POLICY_TEMPLATE}}' '{{.AUDIT_POLICY_RENDERED}}'
+        test -s '{{.AUDIT_POLICY_RENDERED}}' || { echo "render failed: empty {{.AUDIT_POLICY_RENDERED}}" >&2; exit 1; }
+        chmod 0644 '{{.AUDIT_POLICY_RENDERED}}'
+
+        # Render kubeadm config to a readable artifact in .state/ (no inline YAML in cloud-init)
         envsubst \
-          '${ssh_key} ${kubernetes_version_full} ${kubernetes_version} ${pod_cidr} ${service_cidr} ${dns_domain}' \
+          '${kubernetes_version_full} ${service_cidr} ${pod_cidr} ${dns_domain}' \
+          < '{{.KUBEADM_CONFIG_TEMPLATE}}' \
+          > '{{.KUBEADM_CONFIG_RENDERED}}'
+        test -s '{{.KUBEADM_CONFIG_RENDERED}}' || { echo "render failed: empty {{.KUBEADM_CONFIG_RENDERED}}" >&2; exit 1; }
+        chmod 0644 '{{.KUBEADM_CONFIG_RENDERED}}'
+
+        # Indent all but the first line so it nests under cloud-init "content: |"
+        audit_policy="$(sed '1!s/^/      /' '{{.AUDIT_POLICY_RENDERED}}')"
+        kubeadm_config="$(sed '1!s/^/      /' '{{.KUBEADM_CONFIG_RENDERED}}')"
+
+        export ssh_key="$SSH_KEY"
+        export audit_policy
+        export kubeadm_config
+
+        envsubst \
+          '${ssh_key} ${kubernetes_version_full} ${kubernetes_version} ${pod_cidr} ${service_cidr} ${dns_domain} ${audit_policy} ${kubeadm_config}' \
           < '{{.CLOUD_INIT_TEMPLATE}}' \
           > '{{.CLOUD_INIT_RENDERED}}'
 
@@ -596,6 +545,8 @@ tasks:
 
         chmod 0644 '{{.CLOUD_INIT_RENDERED}}'
         echo "Rendered: {{.CLOUD_INIT_RENDERED}}"
+        echo "Rendered: {{.AUDIT_POLICY_RENDERED}}"
+        echo "Rendered: {{.KUBEADM_CONFIG_RENDERED}}"
         echo "Using SSH key: ${KEY_FILE}"
 
   cluster:vms:
@@ -862,29 +813,6 @@ tasks:
                           number: 80
         EOF
         echo '✓ wp ingress applied'
-
-        kubectl -n '{{.WP_NS}}' apply -f - <<EOF
-        apiVersion: networking.k8s.io/v1
-        kind: Ingress
-        metadata:
-          name: goapi
-          labels:
-            app.kubernetes.io/part-of: custom-wordpress
-        spec:
-          ingressClassName: nginx
-          rules:
-            - host: {{.GOAPI_HOST}}
-              http:
-                paths:
-                  - path: /
-                    pathType: Prefix
-                    backend:
-                      service:
-                        name: {{.GOAPI_NAME}}
-                        port:
-                          number: 80
-        EOF
-        echo '✓ goapi ingress applied'
 
         kubectl -n '{{.DASHBOARD_NS}}' apply -f - <<EOF
         apiVersion: networking.k8s.io/v1

@@ -1,0 +1,148 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Non-resource endpoints (health + discovery noise).
+  - level: None
+    nonResourceURLs:
+      - /healthz*
+      - /livez*
+      - /readyz*
+      - /version
+      - /metrics
+      - /api
+      - /apis
+      - /openapi*
+      - /swagger*
+
+  # High-volume patterns.
+  - level: None
+    verbs: ["watch"]
+
+  - level: None
+    resources:
+      - group: ""
+        resources: ["events"]
+
+  # Leader election churn.
+  - level: None
+    verbs: ["get", "list", "watch", "update", "patch"]
+    resources:
+      - group: "coordination.k8s.io"
+        resources: ["leases"]
+
+  # Control-plane background reads that add little value.
+  - level: None
+    users: ["system:apiserver"]
+    verbs: ["get"]
+    resources:
+      - group: ""
+        resources: ["endpoints"]
+        resourceNames: ["kubernetes"]
+      - group: "discovery.k8s.io"
+        resources: ["endpointslices"]
+        resourceNames: ["kubernetes"]
+
+  - level: None
+    users: ["system:apiserver"]
+    verbs: ["list"]
+    resources:
+      - group: ""
+        resources: ["services"]
+
+  # Read-only chatter from serviceaccounts/nodes (writes are handled below).
+  - level: None
+    userGroups: ["system:serviceaccounts"]
+    verbs: ["get", "list", "watch"]
+
+  - level: None
+    userGroups: ["system:nodes"]
+    verbs: ["get", "list", "watch"]
+
+  # Delegated auth spam (TokenReviews / SubjectAccessReviews) from cluster identities.
+  - level: None
+    userGroups: ["system:serviceaccounts", "system:nodes"]
+    verbs: ["create"]
+    resources:
+      - group: "authorization.k8s.io"
+        resources: ["subjectaccessreviews"]
+      - group: "authentication.k8s.io"
+        resources: ["tokenreviews"]
+
+  # --- Token safety rules ---
+  # If *any* TokenReview gets logged, keep it at Metadata so bearer tokens in the requestObject
+  # (and any echoed responseObject) are never written to the audit log.
+  - level: Metadata
+    verbs: ["create"]
+    resources:
+      - group: "authentication.k8s.io"
+        resources: ["tokenreviews"]
+    omitStages:
+      - "RequestReceived"
+
+  # TokenRequest subresource returns a token in the response; never log request/response bodies.
+  - level: Metadata
+    verbs: ["create"]
+    resources:
+      - group: ""
+        resources: ["serviceaccounts/token"]
+    omitStages:
+      - "RequestReceived"
+
+  # Ingress controller status updates (keep spec changes).
+  - level: None
+    users: ["system:serviceaccount:ingress-nginx:ingress-nginx"]
+    verbs: ["update", "patch"]
+    resources:
+      - group: "networking.k8s.io"
+        resources: ["ingresses/status"]
+
+  # Calico controller tier ensure-loop noise.
+  - level: None
+    users: ["system:serviceaccount:calico-system:calico-kube-controllers"]
+    verbs: ["create", "update", "patch"]
+    resources:
+      - group: "crd.projectcalico.org"
+        resources: ["tiers"]
+
+  # Kubelet node status heartbeats/conditions.
+  - level: None
+    userGroups: ["system:nodes"]
+    verbs: ["update", "patch"]
+    resources:
+      - group: ""
+        resources: ["nodes/status"]
+
+  # Tigera operator reconcile noise (drop for clarity).
+  - level: None
+    users: ["system:serviceaccount:tigera-operator:tigera-operator"]
+    verbs: ["update", "patch"]
+    resources:
+      - group: "operator.tigera.io"
+        resources:
+          - "installations"
+          - "installations/status"
+          - "apiservers"
+          - "apiservers/status"
+        resourceNames: ["default"]
+
+  # Never log Secret/ConfigMap contents.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps"]
+    omitStages:
+      - "RequestReceived"
+
+  # Writes: capture full request/response (except RequestReceived stage).
+  - level: RequestResponse
+    verbs: ["create", "update", "patch", "delete", "deletecollection"]
+    omitStages:
+      - "RequestReceived"
+    omitManagedFields: true
+
+  # Baseline: Metadata for everything else.
+  - level: Metadata
+    omitStages:
+      - "RequestReceived"
+    omitManagedFields: true
+

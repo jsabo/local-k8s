@@ -1,0 +1,31 @@
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: __CP0_ADVERTISE_ADDRESS__
+  bindPort: 6443
+nodeRegistration:
+  criSocket: unix:///run/containerd/containerd.sock
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: v${kubernetes_version_full}
+clusterName: k8s
+networking:
+  serviceSubnet: ${service_cidr}
+  podSubnet: ${pod_cidr}
+  dnsDomain: ${dns_domain}
+
+# Audit logging to apiserver stdout (easy to tail via kube-apiserver pod logs).
+apiServer:
+  extraArgs:
+    - name: audit-policy-file
+      value: /etc/kubernetes/audit-policy.yaml
+    - name: audit-log-path
+      value: "-"
+  extraVolumes:
+    - name: audit-policy
+      hostPath: /etc/kubernetes/audit-policy.yaml
+      mountPath: /etc/kubernetes/audit-policy.yaml
+      readOnly: true
+      pathType: File
+

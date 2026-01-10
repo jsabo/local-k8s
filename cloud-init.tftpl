@@ -4,7 +4,7 @@ package_update: true
 package_upgrade: true
 
 users:
-  # Default multipass user; passwordless sudo for demo automation.
+  # Default multipass user; passwordless sudo for automation.
   - name: ubuntu
     sudo: ['ALL=(ALL) NOPASSWD:ALL']
     ssh-authorized-keys:
@@ -42,7 +42,7 @@ write_files:
       net.bridge.bridge-nf-call-ip6tables = 1
       net.ipv4.ip_forward                 = 1
 
-  # Kubernetes audit policy (demo-friendly + token-safe):
+  # Kubernetes audit policy:
   # - Default to Metadata (safe baseline).
   # - Capture most writes at RequestResponse for “who changed what”.
   # - Drop common high-volume noise (health/discovery, watch/events, leases, read chatter).
@@ -85,7 +85,7 @@ write_files:
             - group: "coordination.k8s.io"
               resources: ["leases"]
 
-        # Control-plane background reads that add little demo value.
+        # Control-plane background reads that add little value.
         - level: None
           users: ["system:apiserver"]
           verbs: ["get"]
@@ -167,7 +167,7 @@ write_files:
             - group: ""
               resources: ["nodes/status"]
 
-        # Tigera operator reconcile noise (drop for demo clarity).
+        # Tigera operator reconcile noise (drop for clarity).
         - level: None
           users: ["system:serviceaccount:tigera-operator:tigera-operator"]
           verbs: ["update", "patch"]

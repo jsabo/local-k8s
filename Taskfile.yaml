@@ -46,6 +46,10 @@ vars:
   KUBEADM_CONFIG_TEMPLATE: '{{.TASKFILE_DIR}}/kubeadm-config.tftpl'
   KUBEADM_CONFIG_RENDERED: '{{.STATE_DIR}}/kubeadm-config.yaml'
 
+  # Calico Installation/APIServer custom resources are now templated + rendered like the above.
+  CALICO_CUSTOM_RESOURCES_TEMPLATE: '{{.TASKFILE_DIR}}/calico-custom-resources.tftpl'
+  CALICO_CUSTOM_RESOURCES_RENDERED: '{{.STATE_DIR}}/calico-custom-resources.yaml'
+
   KUBECONFIG_OUT: '{{.STATE_DIR}}/kubeconfig'
   ENV_OUT: '{{.STATE_DIR}}/env'
 
@@ -61,8 +65,8 @@ vars:
   # -------------------------------------------------------------------
   CALICO_STAMP: '{{.STATE_DIR}}/.calico-{{.CALICO_VERSION}}.installed'
   INGRESS_STAMP: '{{.STATE_DIR}}/.ingress-nginx-{{.INGRESS_NODEPORT_HTTP}}-{{.INGRESS_NODEPORT_HTTPS}}.installed'
-  DASHBOARD_STAMP: '{{.STATE_DIR}}/.dashboard.installed'
   LOCAL_PATH_STAMP: '{{.STATE_DIR}}/.local-path-{{.LOCAL_PATH_VERSION}}.installed'
+  HEADLAMP_STAMP: '{{.STATE_DIR}}/.headlamp.installed'
 
   # -------------------------------------------------------------------
   # WordPress app
@@ -88,29 +92,39 @@ vars:
   WP_PV_FS_GROUP: '{{default "2000" .WP_PV_FS_GROUP}}'
 
   # -------------------------------------------------------------------
-  # Demo components
+  # Demo components: Headlamp
   # -------------------------------------------------------------------
-  DASHBOARD_NS: '{{default "kubernetes-dashboard" .DASHBOARD_NS}}'
-  DASHBOARD_RELEASE: '{{default "kubernetes-dashboard" .DASHBOARD_RELEASE}}'
-  DASHBOARD_CHART: '{{default "kubernetes-dashboard/kubernetes-dashboard" .DASHBOARD_CHART}}'
-  DASHBOARD_CHART_VERSION: '{{default "" .DASHBOARD_CHART_VERSION}}'
-  DASHBOARD_SA: '{{default "dashboard-viewer" .DASHBOARD_SA}}'
+  HEADLAMP_NS: '{{default "kube-system" .HEADLAMP_NS}}'
+  HEADLAMP_RELEASE: '{{default "headlamp" .HEADLAMP_RELEASE}}'
+  HEADLAMP_CHART: '{{default "headlamp/headlamp" .HEADLAMP_CHART}}'
+  HEADLAMP_CHART_VERSION: '{{default "" .HEADLAMP_CHART_VERSION}}'
 
+  # Match Headlamp docs by default (SA + ClusterRoleBinding to cluster-admin),
+  # but allow safer overrides:
+  #   HEADLAMP_CLUSTERROLE=view
+  #   HEADLAMP_TOKEN_DURATION=15m
+  HEADLAMP_SA: '{{default "headlamp-admin" .HEADLAMP_SA}}'
+  HEADLAMP_CLUSTERROLE: '{{default "cluster-admin" .HEADLAMP_CLUSTERROLE}}'
+  HEADLAMP_TOKEN_DURATION: '{{default "1h" .HEADLAMP_TOKEN_DURATION}}'
+
+  # -------------------------------------------------------------------
+  # Ingress (NodePort)
+  # -------------------------------------------------------------------
   INGRESS_NS: '{{default "ingress-nginx" .INGRESS_NS}}'
   INGRESS_RELEASE: '{{default "ingress-nginx" .INGRESS_RELEASE}}'
   INGRESS_CHART: '{{default "ingress-nginx/ingress-nginx" .INGRESS_CHART}}'
   INGRESS_CHART_VERSION: '{{default "" .INGRESS_CHART_VERSION}}'
   INGRESS_NODEPORT_HTTP: '{{default "30080" .INGRESS_NODEPORT_HTTP}}'
   INGRESS_NODEPORT_HTTPS: '{{default "30443" .INGRESS_NODEPORT_HTTPS}}'
-  INGRESS_HOST: '{{default "demo.test" .INGRESS_HOST}}'
+  INGRESS_HOST: '{{default "local.k8s" .INGRESS_HOST}}'
 
   # Hostname-per-app (derived from INGRESS_HOST)
   WP_HOST: 'wp.{{.INGRESS_HOST}}'
-  DASHBOARD_HOST: 'dashboard.{{.INGRESS_HOST}}'
+  HEADLAMP_HOST: 'headlamp.{{.INGRESS_HOST}}'
 
 tasks:
   # =====================================================================
-  # Public tasks (match `task` output you showed)
+  # Public tasks
   # =====================================================================
 
   default:
@@ -173,9 +187,8 @@ tasks:
     cmds:
       - task: cluster:up
       - task: storage:local-path:install
-      - task: apps:dashboard:install
+      - task: apps:headlamp:install
       - task: apps:wp:up
-      - task: apps:goapi:install
       - task: apps:ingress:install
       - task: demo:info
 
@@ -185,15 +198,14 @@ tasks:
     deps: [cluster:ready]
     cmds:
       - task: apps:ingress:uninstall
-      - task: apps:goapi:uninstall
       - task: apps:wp:down
-      - task: apps:dashboard:uninstall
+      - task: apps:headlamp:uninstall
       - |
         echo '✓ demo uninstalled'
         echo '• Cluster still running. To delete VMs/state: task cluster:down'
 
   demo:info:
-    desc: 'Print demo URLs + dashboard token + /etc/hosts hint'
+    desc: 'Print demo URLs + Headlamp token + /etc/hosts hint'
     silent: true
     deps: [cluster:ready]
     cmds:
@@ -205,16 +217,16 @@ tasks:
         echo
         echo "Base domain: {{.INGRESS_HOST}}"
         echo "• WordPress:  http://{{.WP_HOST}}:{{.INGRESS_NODEPORT_HTTP}}/"
-        echo "• Dashboard:  https://{{.DASHBOARD_HOST}}:{{.INGRESS_NODEPORT_HTTPS}}/"
+        echo "• Headlamp:   http://{{.HEADLAMP_HOST}}:{{.INGRESS_NODEPORT_HTTP}}/"
         echo
-        echo 'Dashboard token:'
-        kubectl -n '{{.DASHBOARD_NS}}' create token '{{.DASHBOARD_SA}}'
+        echo "Headlamp token (duration: {{.HEADLAMP_TOKEN_DURATION}}):"
+        kubectl -n '{{.HEADLAMP_NS}}' create token '{{.HEADLAMP_SA}}' --duration='{{.HEADLAMP_TOKEN_DURATION}}'
         echo
         echo 'Add these to /etc/hosts if the hostnames do not resolve:'
         CP0_IP="$(multipass list --format csv | awk -F, -v n='{{.CP0}}' '$1==n {print $3; exit}')"
         test -n "${CP0_IP:-}"
         echo "${CP0_IP} {{.WP_HOST}}"
-        echo "${CP0_IP} {{.DASHBOARD_HOST}}"
+        echo "${CP0_IP} {{.HEADLAMP_HOST}}"
 
   # -------------------------------------------------------------------
   # Cluster readiness helpers
@@ -356,65 +368,72 @@ tasks:
         rm -f '{{.INGRESS_STAMP}}' >/dev/null 2>&1 || true
         echo '✓ ingress removed (best-effort)'
 
-  apps:dashboard:install:
+  apps:headlamp:install:
     internal: true
     silent: true
-    desc: 'Install Kubernetes Dashboard + read-only token SA (waits until Ready)'
+    desc: 'Install Headlamp (Helm) + ServiceAccount token auth (waits until Ready)'
     deps: [cluster:ready]
     status:
-      - test -f '{{.DASHBOARD_STAMP}}'
+      - test -f '{{.HEADLAMP_STAMP}}'
     cmds:
       - |
         set -euo pipefail
         command -v helm >/dev/null 2>&1 || { echo 'missing dependency: helm' >&2; exit 1; }
         export KUBECONFIG='{{.KUBECONFIG_OUT}}'
 
-        helm repo add kubernetes-dashboard https://kubernetes.github.io/dashboard/ >/dev/null 2>&1 || true
+        helm repo add headlamp https://kubernetes-sigs.github.io/headlamp/ >/dev/null 2>&1 || true
         helm repo update >/dev/null 2>&1 || true
 
-        kubectl get ns '{{.DASHBOARD_NS}}' >/dev/null 2>&1 || kubectl create ns '{{.DASHBOARD_NS}}'
+        # kube-system should exist; create anyway just in case user overrides HEADLAMP_NS
+        kubectl get ns '{{.HEADLAMP_NS}}' >/dev/null 2>&1 || kubectl create ns '{{.HEADLAMP_NS}}'
 
-        if [ -n '{{.DASHBOARD_CHART_VERSION}}' ]; then
-          helm upgrade --install '{{.DASHBOARD_RELEASE}}' '{{.DASHBOARD_CHART}}' \
-            -n '{{.DASHBOARD_NS}}' --version '{{.DASHBOARD_CHART_VERSION}}'
+        if [ -n '{{.HEADLAMP_CHART_VERSION}}' ]; then
+          helm upgrade --install '{{.HEADLAMP_RELEASE}}' '{{.HEADLAMP_CHART}}' \
+            -n '{{.HEADLAMP_NS}}' --version '{{.HEADLAMP_CHART_VERSION}}'
         else
-          helm upgrade --install '{{.DASHBOARD_RELEASE}}' '{{.DASHBOARD_CHART}}' \
-            -n '{{.DASHBOARD_NS}}'
+          helm upgrade --install '{{.HEADLAMP_RELEASE}}' '{{.HEADLAMP_CHART}}' \
+            -n '{{.HEADLAMP_NS}}'
         fi
 
-        kubectl -n '{{.DASHBOARD_NS}}' apply -f - <<EOF
-        apiVersion: v1
-        kind: ServiceAccount
-        metadata:
-          name: {{.DASHBOARD_SA}}
-        ---
+        # Create a ServiceAccount for Headlamp token login.
+        kubectl -n '{{.HEADLAMP_NS}}' get sa '{{.HEADLAMP_SA}}' >/dev/null 2>&1 || \
+          kubectl -n '{{.HEADLAMP_NS}}' create serviceaccount '{{.HEADLAMP_SA}}' >/dev/null
+
+        # Bind SA to a ClusterRole (default: cluster-admin to match Headlamp docs).
+        # Override: HEADLAMP_CLUSTERROLE=view for least-privilege.
+        CRB_NAME='{{.HEADLAMP_SA}}-{{.HEADLAMP_CLUSTERROLE}}'
+        kubectl get clusterrolebinding "${CRB_NAME}" >/dev/null 2>&1 || \
+          kubectl apply -f - >/dev/null <<EOF
         apiVersion: rbac.authorization.k8s.io/v1
         kind: ClusterRoleBinding
         metadata:
-          name: {{.DASHBOARD_SA}}-view
+          name: ${CRB_NAME}
         roleRef:
           apiGroup: rbac.authorization.k8s.io
           kind: ClusterRole
-          name: view
+          name: {{.HEADLAMP_CLUSTERROLE}}
         subjects:
           - kind: ServiceAccount
-            name: {{.DASHBOARD_SA}}
-            namespace: {{.DASHBOARD_NS}}
+            name: {{.HEADLAMP_SA}}
+            namespace: {{.HEADLAMP_NS}}
         EOF
 
-        echo 'Waiting for dashboard deployments to become Available...'
-        kubectl -n '{{.DASHBOARD_NS}}' wait --for=condition=Available deploy --all --timeout=300s >/dev/null
+        echo 'Waiting for Headlamp deployments to become Available...'
+        kubectl -n '{{.HEADLAMP_NS}}' wait --for=condition=Available deploy -l app.kubernetes.io/instance='{{.HEADLAMP_RELEASE}}' --timeout=300s >/dev/null 2>&1 || true
+
+        # If label-based wait didn't match, fall back to a best-effort wait on any deploy named like the release.
+        kubectl -n '{{.HEADLAMP_NS}}' wait --for=condition=Available deploy/'{{.HEADLAMP_RELEASE}}' --timeout=300s >/dev/null 2>&1 || true
 
         mkdir -p '{{.STATE_DIR}}'
-        touch '{{.DASHBOARD_STAMP}}'
+        touch '{{.HEADLAMP_STAMP}}'
 
-        echo '✓ dashboard ready'
-        kubectl -n '{{.DASHBOARD_NS}}' get pods -o wide
+        echo '✓ headlamp ready'
+        kubectl -n '{{.HEADLAMP_NS}}' get pods -o wide | grep -i headlamp || true
 
-  apps:dashboard:uninstall:
+  apps:headlamp:uninstall:
     internal: true
     silent: true
-    desc: 'Uninstall Kubernetes Dashboard'
+    desc: 'Uninstall Headlamp + SA/CRB (best-effort)'
     deps: [cluster:ready]
     cmds:
       - |
@@ -422,11 +441,12 @@ tasks:
         command -v helm >/dev/null 2>&1 || { echo 'missing dependency: helm' >&2; exit 1; }
         export KUBECONFIG='{{.KUBECONFIG_OUT}}'
 
-        helm uninstall '{{.DASHBOARD_RELEASE}}' -n '{{.DASHBOARD_NS}}' >/dev/null 2>&1 || true
-        kubectl delete ns '{{.DASHBOARD_NS}}' >/dev/null 2>&1 || true
-        kubectl delete clusterrolebinding '{{.DASHBOARD_SA}}-view' >/dev/null 2>&1 || true
-        rm -f '{{.DASHBOARD_STAMP}}' >/dev/null 2>&1 || true
-        echo '✓ dashboard removed (best-effort)'
+        CRB_NAME='{{.HEADLAMP_SA}}-{{.HEADLAMP_CLUSTERROLE}}'
+        helm uninstall '{{.HEADLAMP_RELEASE}}' -n '{{.HEADLAMP_NS}}' >/dev/null 2>&1 || true
+        kubectl delete clusterrolebinding "${CRB_NAME}" >/dev/null 2>&1 || true
+        kubectl -n '{{.HEADLAMP_NS}}' delete sa '{{.HEADLAMP_SA}}' >/dev/null 2>&1 || true
+        rm -f '{{.HEADLAMP_STAMP}}' >/dev/null 2>&1 || true
+        echo '✓ headlamp removed (best-effort)'
 
   apps:wp:up:
     internal: true
@@ -484,6 +504,7 @@ tasks:
         test -f '{{.CLOUD_INIT_TEMPLATE}}' || { echo "missing: {{.CLOUD_INIT_TEMPLATE}}" >&2; exit 1; }
         test -f '{{.AUDIT_POLICY_TEMPLATE}}' || { echo "missing: {{.AUDIT_POLICY_TEMPLATE}}" >&2; exit 1; }
         test -f '{{.KUBEADM_CONFIG_TEMPLATE}}' || { echo "missing: {{.KUBEADM_CONFIG_TEMPLATE}}" >&2; exit 1; }
+        test -f '{{.CALICO_CUSTOM_RESOURCES_TEMPLATE}}' || { echo "missing: {{.CALICO_CUSTOM_RESOURCES_TEMPLATE}}" >&2; exit 1; }
 
   cluster:render:
     internal: true
@@ -527,6 +548,14 @@ tasks:
         test -s '{{.KUBEADM_CONFIG_RENDERED}}' || { echo "render failed: empty {{.KUBEADM_CONFIG_RENDERED}}" >&2; exit 1; }
         chmod 0644 '{{.KUBEADM_CONFIG_RENDERED}}'
 
+        # Render Calico custom resources (Installation + APIServer) to .state/
+        envsubst \
+          '${pod_cidr}' \
+          < '{{.CALICO_CUSTOM_RESOURCES_TEMPLATE}}' \
+          > '{{.CALICO_CUSTOM_RESOURCES_RENDERED}}'
+        test -s '{{.CALICO_CUSTOM_RESOURCES_RENDERED}}' || { echo "render failed: empty {{.CALICO_CUSTOM_RESOURCES_RENDERED}}" >&2; exit 1; }
+        chmod 0644 '{{.CALICO_CUSTOM_RESOURCES_RENDERED}}'
+
         # Indent all but the first line so it nests under cloud-init "content: |"
         audit_policy="$(sed '1!s/^/      /' '{{.AUDIT_POLICY_RENDERED}}')"
         kubeadm_config="$(sed '1!s/^/      /' '{{.KUBEADM_CONFIG_RENDERED}}')"
@@ -547,6 +576,7 @@ tasks:
         echo "Rendered: {{.CLOUD_INIT_RENDERED}}"
         echo "Rendered: {{.AUDIT_POLICY_RENDERED}}"
         echo "Rendered: {{.KUBEADM_CONFIG_RENDERED}}"
+        echo "Rendered: {{.CALICO_CUSTOM_RESOURCES_RENDERED}}"
         echo "Using SSH key: ${KEY_FILE}"
 
   cluster:vms:
@@ -678,30 +708,8 @@ tasks:
         echo 'Waiting for tigera-operator deployment...'
         kubectl -n tigera-operator wait --for=condition=Available deployment/tigera-operator --timeout=240s >/dev/null
 
-        mkdir -p '{{.STATE_DIR}}'
-        cat > '{{.STATE_DIR}}/calico-custom-resources.yaml' <<EOF
-        apiVersion: operator.tigera.io/v1
-        kind: Installation
-        metadata:
-          name: default
-        spec:
-          calicoNetwork:
-            linuxDataplane: Iptables
-            ipPools:
-            - cidr: {{.POD_CIDR}}
-              encapsulation: VXLANCrossSubnet
-              natOutgoing: Enabled
-              nodeSelector: all()
-        ---
-        apiVersion: operator.tigera.io/v1
-        kind: APIServer
-        metadata:
-          name: default
-        spec: {}
-        EOF
-
-        echo 'Applying Calico custom resources...'
-        kubectl apply --server-side --force-conflicts -f '{{.STATE_DIR}}/calico-custom-resources.yaml' >/dev/null
+        echo 'Applying Calico custom resources (rendered)...'
+        kubectl apply --server-side --force-conflicts -f '{{.CALICO_CUSTOM_RESOURCES_RENDERED}}' >/dev/null
 
         echo 'Waiting for calico-system namespace and calico-node...'
         for i in $(seq 1 60); do
@@ -771,25 +779,20 @@ tasks:
   ingress:rules:apply:
     internal: true
     silent: true
-    desc: 'Apply ingress rules for WordPress, Go API, and Dashboard (hostname-per-app)'
+    desc: 'Apply ingress rules for WordPress + Headlamp (hostname-per-app)'
     deps: [cluster:ready]
     cmds:
       - |
         set -euo pipefail
         export KUBECONFIG='{{.KUBECONFIG_OUT}}'
 
-        CHART_NAME='custom-wordpress'
-        if echo '{{.WP_RELEASE}}' | grep -q "$CHART_NAME"; then
+        # --- WordPress service name (robust to release naming) ---
+        WP_CHART_NAME='custom-wordpress'
+        if echo '{{.WP_RELEASE}}' | grep -q "$WP_CHART_NAME"; then
           WP_SVC='{{.WP_RELEASE}}'
         else
-          WP_SVC="{{.WP_RELEASE}}-${CHART_NAME}"
+          WP_SVC="{{.WP_RELEASE}}-${WP_CHART_NAME}"
         fi
-
-        DASH_SVC="$(kubectl -n '{{.DASHBOARD_NS}}' get svc -o jsonpath='{.items[?(@.spec.ports[*].port==443)].metadata.name}' | awk '{print $1}' || true)"
-        if [ -z "${DASH_SVC:-}" ]; then
-          DASH_SVC="$(kubectl -n '{{.DASHBOARD_NS}}' get svc -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-        fi
-        test -n "${DASH_SVC:-}" || { echo 'Could not determine dashboard service name' >&2; exit 1; }
 
         kubectl -n '{{.WP_NS}}' apply -f - <<EOF
         apiVersion: networking.k8s.io/v1
@@ -814,30 +817,36 @@ tasks:
         EOF
         echo '✓ wp ingress applied'
 
-        kubectl -n '{{.DASHBOARD_NS}}' apply -f - <<EOF
+        # --- Headlamp service name (robust to release naming) ---
+        HEADLAMP_CHART_NAME='headlamp'
+        if echo '{{.HEADLAMP_RELEASE}}' | grep -q "$HEADLAMP_CHART_NAME"; then
+          HEADLAMP_SVC='{{.HEADLAMP_RELEASE}}'
+        else
+          HEADLAMP_SVC="{{.HEADLAMP_RELEASE}}-${HEADLAMP_CHART_NAME}"
+        fi
+
+        kubectl -n '{{.HEADLAMP_NS}}' apply -f - <<EOF
         apiVersion: networking.k8s.io/v1
         kind: Ingress
         metadata:
-          name: dashboard
+          name: headlamp
           labels:
-            app.kubernetes.io/part-of: custom-wordpress
-          annotations:
-            nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+            app.kubernetes.io/part-of: headlamp
         spec:
           ingressClassName: nginx
           rules:
-            - host: {{.DASHBOARD_HOST}}
+            - host: {{.HEADLAMP_HOST}}
               http:
                 paths:
                   - path: /
                     pathType: Prefix
                     backend:
                       service:
-                        name: ${DASH_SVC}
+                        name: ${HEADLAMP_SVC}
                         port:
-                          number: 443
+                          number: 80
         EOF
-        echo '✓ dashboard ingress applied'
+        echo '✓ headlamp ingress applied'
 
   ingress:rules:delete:
     internal: true
@@ -849,8 +858,7 @@ tasks:
         set -euo pipefail
         export KUBECONFIG='{{.KUBECONFIG_OUT}}'
         kubectl -n '{{.WP_NS}}' delete ingress wp >/dev/null 2>&1 || true
-        kubectl -n '{{.WP_NS}}' delete ingress goapi >/dev/null 2>&1 || true
-        kubectl -n '{{.DASHBOARD_NS}}' delete ingress dashboard >/dev/null 2>&1 || true
+        kubectl -n '{{.HEADLAMP_NS}}' delete ingress headlamp >/dev/null 2>&1 || true
         echo '✓ ingress rules deleted (best-effort)'
 
   # -------------------------------------------------------------------

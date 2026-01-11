@@ -50,6 +50,15 @@ vars:
   CALICO_CUSTOM_RESOURCES_TEMPLATE: '{{.TASKFILE_DIR}}/calico-custom-resources.tftpl'
   CALICO_CUSTOM_RESOURCES_RENDERED: '{{.STATE_DIR}}/calico-custom-resources.yaml'
 
+  # -------------------------------------------------------------------
+  # Rendered manifests (grouped templates)
+  # -------------------------------------------------------------------
+  HEADLAMP_MANIFEST_TEMPLATE: '{{.TASKFILE_DIR}}/headlamp.tftpl'
+  HEADLAMP_MANIFEST_RENDERED: '{{.STATE_DIR}}/headlamp.yaml'
+
+  INGRESS_RULES_TEMPLATE: '{{.TASKFILE_DIR}}/ingress.tftpl'
+  INGRESS_RULES_RENDERED: '{{.STATE_DIR}}/ingress.yaml'
+
   KUBECONFIG_OUT: '{{.STATE_DIR}}/kubeconfig'
   ENV_OUT: '{{.STATE_DIR}}/env'
 
@@ -64,32 +73,9 @@ vars:
   # Stamp files (idempotence without noisy repeats)
   # -------------------------------------------------------------------
   CALICO_STAMP: '{{.STATE_DIR}}/.calico-{{.CALICO_VERSION}}.installed'
-  INGRESS_STAMP: '{{.STATE_DIR}}/.ingress-nginx-{{.INGRESS_NODEPORT_HTTP}}-{{.INGRESS_NODEPORT_HTTPS}}.installed'
+  INGRESS_STAMP: '{{.STATE_DIR}}/.ingress-nginx-{{default "30080" .INGRESS_NODEPORT_HTTP}}-{{default "30443" .INGRESS_NODEPORT_HTTPS}}.installed'
   LOCAL_PATH_STAMP: '{{.STATE_DIR}}/.local-path-{{.LOCAL_PATH_VERSION}}.installed'
   HEADLAMP_STAMP: '{{.STATE_DIR}}/.headlamp.installed'
-
-  # -------------------------------------------------------------------
-  # WordPress app
-  # -------------------------------------------------------------------
-  WP_NS: '{{default "wordpress-demo" .WP_NS}}'
-  WP_RELEASE: '{{default "custom-wordpress" .WP_RELEASE}}'
-  WP_CHART: '{{default "./charts/custom-wordpress" .WP_CHART}}'
-  WP_RBAC_DIR: '{{default "./rbac" .WP_RBAC_DIR}}'
-
-  WP_DEPLOYER_USER: '{{default "wp-deployer" .WP_DEPLOYER_USER}}'
-  WP_ACCESSOR_USER: '{{default "wp-accessor" .WP_ACCESSOR_USER}}'
-  WP_DEPLOYER_GROUP: '{{default "wp-deployers" .WP_DEPLOYER_GROUP}}'
-  WP_ACCESSOR_GROUP: '{{default "wp-accessors" .WP_ACCESSOR_GROUP}}'
-
-  WP_USERS_DIR: '{{.STATE_DIR}}/users/{{.WP_NS}}'
-  WP_DEPLOYER_KUBECONFIG: '{{.WP_USERS_DIR}}/deployer.kubeconfig'
-  WP_ACCESSOR_KUBECONFIG: '{{.WP_USERS_DIR}}/accessor.kubeconfig'
-
-  WP_STORAGE_NODE: '{{default "worker-0" .WP_STORAGE_NODE}}'
-  WP_STORAGE_CLASS: '{{default .LOCAL_PATH_STORAGECLASS .WP_STORAGE_CLASS}}'
-  WP_PVC_WP_SIZE: '{{default "5Gi" .WP_PVC_WP_SIZE}}'
-  WP_PVC_MYSQL_SIZE: '{{default "5Gi" .WP_PVC_MYSQL_SIZE}}'
-  WP_PV_FS_GROUP: '{{default "2000" .WP_PV_FS_GROUP}}'
 
   # -------------------------------------------------------------------
   # Demo components: Headlamp
@@ -119,8 +105,13 @@ vars:
   INGRESS_HOST: '{{default "local.k8s" .INGRESS_HOST}}'
 
   # Hostname-per-app (derived from INGRESS_HOST)
-  WP_HOST: 'wp.{{.INGRESS_HOST}}'
   HEADLAMP_HOST: 'headlamp.{{.INGRESS_HOST}}'
+
+  # -------------------------------------------------------------------
+  # Calico Whisker exposure (Ingress)
+  # -------------------------------------------------------------------
+  WHISKER_NS: '{{default "calico-system" .WHISKER_NS}}'
+  WHISKER_HOST: 'whisker.{{.INGRESS_HOST}}'
 
 tasks:
   # =====================================================================
@@ -150,7 +141,7 @@ tasks:
         echo "Run: source {{.ENV_OUT}}"
 
   cluster:down:
-    desc: 'Delete cluster VMs + local state'
+    desc: 'Delete cluster VMs + local state (keeps Multipass cache)'
     silent: true
     cmds:
       - |
@@ -161,9 +152,26 @@ tasks:
             multipass delete -p "$n" >/dev/null 2>&1 || true
           fi
         done
+        rm -rf '{{.STATE_DIR}}'
+        echo '✓ cluster destroyed (cache preserved)'
+        echo '• To also wipe Multipass cache/images: task cluster:purge'
+
+  cluster:purge:
+    desc: 'Delete cluster VMs + local state + Multipass cache (purge)'
+    silent: true
+    cmds:
+      - |
+        set -euo pipefail
+        for n in {{.NODES}}; do
+          if multipass info "$n" >/dev/null 2>&1; then
+            echo "Deleting $n..."
+            multipass delete -p "$n" >/dev/null 2>&1 || true
+          fi
+        done
+        echo 'Purging Multipass (removes cached images too)...'
         multipass purge >/dev/null 2>&1 || true
         rm -rf '{{.STATE_DIR}}'
-        echo '✓ cluster destroyed'
+        echo '✓ cluster destroyed + multipass purged'
 
   cluster:status:
     desc: 'Show cluster nodes'
@@ -182,13 +190,12 @@ tasks:
         KUBECONFIG='{{.KUBECONFIG_OUT}}' kubectl get nodes -o wide
 
   demo:install:
-    desc: 'Install full demo (cluster + storage + apps) and print URLs'
+    desc: 'Install demo (cluster + storage + Headlamp + ingress) and print URLs'
     silent: true
     cmds:
       - task: cluster:up
       - task: storage:local-path:install
       - task: apps:headlamp:install
-      - task: apps:wp:up
       - task: apps:ingress:install
       - task: demo:info
 
@@ -198,7 +205,6 @@ tasks:
     deps: [cluster:ready]
     cmds:
       - task: apps:ingress:uninstall
-      - task: apps:wp:down
       - task: apps:headlamp:uninstall
       - |
         echo '✓ demo uninstalled'
@@ -216,8 +222,8 @@ tasks:
         echo '✓ demo ready'
         echo
         echo "Base domain: {{.INGRESS_HOST}}"
-        echo "• WordPress:  http://{{.WP_HOST}}:{{.INGRESS_NODEPORT_HTTP}}/"
         echo "• Headlamp:   http://{{.HEADLAMP_HOST}}:{{.INGRESS_NODEPORT_HTTP}}/"
+        echo "• Whisker:    http://{{.WHISKER_HOST}}:{{.INGRESS_NODEPORT_HTTP}}/"
         echo
         echo "Headlamp token (duration: {{.HEADLAMP_TOKEN_DURATION}}):"
         kubectl -n '{{.HEADLAMP_NS}}' create token '{{.HEADLAMP_SA}}' --duration='{{.HEADLAMP_TOKEN_DURATION}}'
@@ -225,8 +231,8 @@ tasks:
         echo 'Add these to /etc/hosts if the hostnames do not resolve:'
         CP0_IP="$(multipass list --format csv | awk -F, -v n='{{.CP0}}' '$1==n {print $3; exit}')"
         test -n "${CP0_IP:-}"
-        echo "${CP0_IP} {{.WP_HOST}}"
         echo "${CP0_IP} {{.HEADLAMP_HOST}}"
+        echo "${CP0_IP} {{.WHISKER_HOST}}"
 
   # -------------------------------------------------------------------
   # Cluster readiness helpers
@@ -372,7 +378,7 @@ tasks:
     internal: true
     silent: true
     desc: 'Install Headlamp (Helm) + ServiceAccount token auth (waits until Ready)'
-    deps: [cluster:ready]
+    deps: [cluster:ready, cluster:render]
     status:
       - test -f '{{.HEADLAMP_STAMP}}'
     cmds:
@@ -399,24 +405,8 @@ tasks:
         kubectl -n '{{.HEADLAMP_NS}}' get sa '{{.HEADLAMP_SA}}' >/dev/null 2>&1 || \
           kubectl -n '{{.HEADLAMP_NS}}' create serviceaccount '{{.HEADLAMP_SA}}' >/dev/null
 
-        # Bind SA to a ClusterRole (default: cluster-admin to match Headlamp docs).
-        # Override: HEADLAMP_CLUSTERROLE=view for least-privilege.
-        CRB_NAME='{{.HEADLAMP_SA}}-{{.HEADLAMP_CLUSTERROLE}}'
-        kubectl get clusterrolebinding "${CRB_NAME}" >/dev/null 2>&1 || \
-          kubectl apply -f - >/dev/null <<EOF
-        apiVersion: rbac.authorization.k8s.io/v1
-        kind: ClusterRoleBinding
-        metadata:
-          name: ${CRB_NAME}
-        roleRef:
-          apiGroup: rbac.authorization.k8s.io
-          kind: ClusterRole
-          name: {{.HEADLAMP_CLUSTERROLE}}
-        subjects:
-          - kind: ServiceAccount
-            name: {{.HEADLAMP_SA}}
-            namespace: {{.HEADLAMP_NS}}
-        EOF
+        # Apply the rendered ClusterRoleBinding (from .state/)
+        kubectl apply -f '{{.HEADLAMP_MANIFEST_RENDERED}}' >/dev/null
 
         echo 'Waiting for Headlamp deployments to become Available...'
         kubectl -n '{{.HEADLAMP_NS}}' wait --for=condition=Available deploy -l app.kubernetes.io/instance='{{.HEADLAMP_RELEASE}}' --timeout=300s >/dev/null 2>&1 || true
@@ -448,40 +438,6 @@ tasks:
         rm -f '{{.HEADLAMP_STAMP}}' >/dev/null 2>&1 || true
         echo '✓ headlamp removed (best-effort)'
 
-  apps:wp:up:
-    internal: true
-    silent: true
-    desc: 'Install WordPress (RBAC + CSR users + Helm) (waits until Ready)'
-    deps: [cluster:ready]
-    cmds:
-      - task: wp:ns
-      - task: wp:rbac
-      - task: wp:user:deployer
-      - task: wp:user:accessor
-      - task: wp:install
-      - |
-        set -euo pipefail
-        export KUBECONFIG='{{.KUBECONFIG_OUT}}'
-        echo 'Waiting for WordPress workloads to become Available...'
-        kubectl -n '{{.WP_NS}}' wait --for=condition=Available deployment/{{.WP_RELEASE}} --timeout=360s >/dev/null
-        kubectl -n '{{.WP_NS}}' wait --for=condition=Available deployment/{{.WP_RELEASE}}-mysql --timeout=360s >/dev/null
-      - 'echo "Deployer kubeconfig: {{.WP_DEPLOYER_KUBECONFIG}}"'
-      - 'echo "Accessor kubeconfig: {{.WP_ACCESSOR_KUBECONFIG}}"'
-
-  apps:wp:down:
-    internal: true
-    silent: true
-    desc: 'Uninstall WordPress and clean namespace + generated kubeconfigs'
-    deps: [cluster:ready]
-    cmds:
-      - task: wp:uninstall
-      - |
-        set -euo pipefail
-        export KUBECONFIG='{{.KUBECONFIG_OUT}}'
-        kubectl delete ns '{{.WP_NS}}' >/dev/null 2>&1 || true
-        rm -rf '{{.WP_USERS_DIR}}' || true
-        echo '✓ wordpress cleaned (best-effort)'
-
   # -------------------------------------------------------------------
   # Cluster build plumbing
   # -------------------------------------------------------------------
@@ -505,11 +461,13 @@ tasks:
         test -f '{{.AUDIT_POLICY_TEMPLATE}}' || { echo "missing: {{.AUDIT_POLICY_TEMPLATE}}" >&2; exit 1; }
         test -f '{{.KUBEADM_CONFIG_TEMPLATE}}' || { echo "missing: {{.KUBEADM_CONFIG_TEMPLATE}}" >&2; exit 1; }
         test -f '{{.CALICO_CUSTOM_RESOURCES_TEMPLATE}}' || { echo "missing: {{.CALICO_CUSTOM_RESOURCES_TEMPLATE}}" >&2; exit 1; }
+        test -f '{{.HEADLAMP_MANIFEST_TEMPLATE}}' || { echo "missing: {{.HEADLAMP_MANIFEST_TEMPLATE}}" >&2; exit 1; }
+        test -f '{{.INGRESS_RULES_TEMPLATE}}' || { echo "missing: {{.INGRESS_RULES_TEMPLATE}}" >&2; exit 1; }
 
   cluster:render:
     internal: true
     silent: true
-    desc: 'Render cloud-init to .state/cloud-init.yaml'
+    desc: 'Render templates to .state/'
     deps: [cluster:preflight]
     cmds:
       - |
@@ -556,6 +514,39 @@ tasks:
         test -s '{{.CALICO_CUSTOM_RESOURCES_RENDERED}}' || { echo "render failed: empty {{.CALICO_CUSTOM_RESOURCES_RENDERED}}" >&2; exit 1; }
         chmod 0644 '{{.CALICO_CUSTOM_RESOURCES_RENDERED}}'
 
+        # Render Headlamp + Ingress grouped manifests (to .state/)
+        export headlamp_ns='{{.HEADLAMP_NS}}'
+        export headlamp_sa='{{.HEADLAMP_SA}}'
+        export headlamp_clusterrole='{{.HEADLAMP_CLUSTERROLE}}'
+        export crb_name='{{.HEADLAMP_SA}}-{{.HEADLAMP_CLUSTERROLE}}'
+
+        export ingress_ns='{{.INGRESS_NS}}'
+        export whisker_ns='{{.WHISKER_NS}}'
+        export headlamp_host='{{.HEADLAMP_HOST}}'
+        export whisker_host='{{.WHISKER_HOST}}'
+
+        # Headlamp service name (deterministic from release name)
+        HEADLAMP_CHART_NAME='headlamp'
+        if echo '{{.HEADLAMP_RELEASE}}' | grep -q "$HEADLAMP_CHART_NAME"; then
+          export headlamp_svc='{{.HEADLAMP_RELEASE}}'
+        else
+          export headlamp_svc='{{.HEADLAMP_RELEASE}}-headlamp'
+        fi
+
+        envsubst \
+          '${crb_name} ${headlamp_clusterrole} ${headlamp_sa} ${headlamp_ns}' \
+          < '{{.HEADLAMP_MANIFEST_TEMPLATE}}' \
+          > '{{.HEADLAMP_MANIFEST_RENDERED}}'
+        test -s '{{.HEADLAMP_MANIFEST_RENDERED}}' || { echo "render failed: empty {{.HEADLAMP_MANIFEST_RENDERED}}" >&2; exit 1; }
+        chmod 0644 '{{.HEADLAMP_MANIFEST_RENDERED}}'
+
+        envsubst \
+          '${headlamp_ns} ${whisker_ns} ${ingress_ns} ${headlamp_host} ${whisker_host} ${headlamp_svc}' \
+          < '{{.INGRESS_RULES_TEMPLATE}}' \
+          > '{{.INGRESS_RULES_RENDERED}}'
+        test -s '{{.INGRESS_RULES_RENDERED}}' || { echo "render failed: empty {{.INGRESS_RULES_RENDERED}}" >&2; exit 1; }
+        chmod 0644 '{{.INGRESS_RULES_RENDERED}}'
+
         # Indent all but the first line so it nests under cloud-init "content: |"
         audit_policy="$(sed '1!s/^/      /' '{{.AUDIT_POLICY_RENDERED}}')"
         kubeadm_config="$(sed '1!s/^/      /' '{{.KUBEADM_CONFIG_RENDERED}}')"
@@ -577,6 +568,8 @@ tasks:
         echo "Rendered: {{.AUDIT_POLICY_RENDERED}}"
         echo "Rendered: {{.KUBEADM_CONFIG_RENDERED}}"
         echo "Rendered: {{.CALICO_CUSTOM_RESOURCES_RENDERED}}"
+        echo "Rendered: {{.HEADLAMP_MANIFEST_RENDERED}}"
+        echo "Rendered: {{.INGRESS_RULES_RENDERED}}"
         echo "Using SSH key: ${KEY_FILE}"
 
   cluster:vms:
@@ -711,15 +704,39 @@ tasks:
         echo 'Applying Calico custom resources (rendered)...'
         kubectl apply --server-side --force-conflicts -f '{{.CALICO_CUSTOM_RESOURCES_RENDERED}}' >/dev/null
 
-        echo 'Waiting for calico-system namespace and calico-node...'
-        for i in $(seq 1 60); do
+        echo 'Waiting for calico-system namespace...'
+        for i in $(seq 1 90); do
           if kubectl get ns calico-system >/dev/null 2>&1; then break; fi
           sleep 2
         done
         kubectl get ns calico-system >/dev/null 2>&1 || { echo 'calico-system namespace not created' >&2; exit 1; }
 
-        echo 'Waiting for calico-node rollout...'
-        kubectl -n calico-system rollout status ds/calico-node --timeout=360s >/dev/null
+        echo 'Waiting for calico-node DaemonSet to be created (operator reconciliation + image pulls can take time)...'
+        DS_NAME=''
+        for i in $(seq 1 120); do
+          DS_NAME="$(kubectl -n calico-system get ds 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^calico-node' | head -n1 || true)"
+          if [ -n "${DS_NAME:-}" ]; then break; fi
+          sleep 2
+        done
+
+        if [ -z "${DS_NAME:-}" ]; then
+          echo 'calico-node DaemonSet still not present. Debug dump:' >&2
+          echo '--- tigera-operator pods ---' >&2
+          kubectl -n tigera-operator get pods -o wide >&2 || true
+          echo '--- calico-system pods (if any) ---' >&2
+          kubectl -n calico-system get pods -o wide >&2 || true
+          echo '--- calico-system daemonsets ---' >&2
+          kubectl -n calico-system get ds >&2 || true
+          echo '--- tigera-operator logs (tail) ---' >&2
+          kubectl -n tigera-operator logs deploy/tigera-operator --tail=200 >&2 || true
+          exit 1
+        fi
+
+        echo "Waiting for ${DS_NAME} rollout..."
+        kubectl -n calico-system rollout status "ds/${DS_NAME}" --timeout=600s >/dev/null
+
+        # Best-effort: kube-controllers may come up slightly later depending on images/cluster speed.
+        kubectl -n calico-system rollout status deploy/calico-kube-controllers --timeout=600s >/dev/null 2>&1 || true
 
         touch '{{.CALICO_STAMP}}'
         echo '✓ calico ready'
@@ -779,74 +796,14 @@ tasks:
   ingress:rules:apply:
     internal: true
     silent: true
-    desc: 'Apply ingress rules for WordPress + Headlamp (hostname-per-app)'
-    deps: [cluster:ready]
+    desc: 'Apply ingress rules for Headlamp + Whisker (from rendered .state/ingress.yaml)'
+    deps: [cluster:ready, cluster:render]
     cmds:
       - |
         set -euo pipefail
         export KUBECONFIG='{{.KUBECONFIG_OUT}}'
-
-        # --- WordPress service name (robust to release naming) ---
-        WP_CHART_NAME='custom-wordpress'
-        if echo '{{.WP_RELEASE}}' | grep -q "$WP_CHART_NAME"; then
-          WP_SVC='{{.WP_RELEASE}}'
-        else
-          WP_SVC="{{.WP_RELEASE}}-${WP_CHART_NAME}"
-        fi
-
-        kubectl -n '{{.WP_NS}}' apply -f - <<EOF
-        apiVersion: networking.k8s.io/v1
-        kind: Ingress
-        metadata:
-          name: wp
-          labels:
-            app.kubernetes.io/part-of: custom-wordpress
-        spec:
-          ingressClassName: nginx
-          rules:
-            - host: {{.WP_HOST}}
-              http:
-                paths:
-                  - path: /
-                    pathType: Prefix
-                    backend:
-                      service:
-                        name: ${WP_SVC}
-                        port:
-                          number: 80
-        EOF
-        echo '✓ wp ingress applied'
-
-        # --- Headlamp service name (robust to release naming) ---
-        HEADLAMP_CHART_NAME='headlamp'
-        if echo '{{.HEADLAMP_RELEASE}}' | grep -q "$HEADLAMP_CHART_NAME"; then
-          HEADLAMP_SVC='{{.HEADLAMP_RELEASE}}'
-        else
-          HEADLAMP_SVC="{{.HEADLAMP_RELEASE}}-${HEADLAMP_CHART_NAME}"
-        fi
-
-        kubectl -n '{{.HEADLAMP_NS}}' apply -f - <<EOF
-        apiVersion: networking.k8s.io/v1
-        kind: Ingress
-        metadata:
-          name: headlamp
-          labels:
-            app.kubernetes.io/part-of: headlamp
-        spec:
-          ingressClassName: nginx
-          rules:
-            - host: {{.HEADLAMP_HOST}}
-              http:
-                paths:
-                  - path: /
-                    pathType: Prefix
-                    backend:
-                      service:
-                        name: ${HEADLAMP_SVC}
-                        port:
-                          number: 80
-        EOF
-        echo '✓ headlamp ingress applied'
+        kubectl apply -f '{{.INGRESS_RULES_RENDERED}}' >/dev/null
+        echo '✓ ingress rules applied'
 
   ingress:rules:delete:
     internal: true
@@ -857,185 +814,8 @@ tasks:
       - |
         set -euo pipefail
         export KUBECONFIG='{{.KUBECONFIG_OUT}}'
-        kubectl -n '{{.WP_NS}}' delete ingress wp >/dev/null 2>&1 || true
         kubectl -n '{{.HEADLAMP_NS}}' delete ingress headlamp >/dev/null 2>&1 || true
+        kubectl -n '{{.WHISKER_NS}}' delete ingress whisker >/dev/null 2>&1 || true
+        kubectl -n '{{.WHISKER_NS}}' delete networkpolicy whisker-ingress-nginx >/dev/null 2>&1 || true
         echo '✓ ingress rules deleted (best-effort)'
-
-  # -------------------------------------------------------------------
-  # WordPress plumbing (dynamic provisioning via local-path)
-  # -------------------------------------------------------------------
-
-  wp:ns:
-    internal: true
-    silent: true
-    desc: 'Ensure WordPress namespace exists'
-    deps: [cluster:ready]
-    cmds:
-      - |
-        set -euo pipefail
-        export KUBECONFIG='{{.KUBECONFIG_OUT}}'
-        kubectl get ns '{{.WP_NS}}' >/dev/null 2>&1 || kubectl create ns '{{.WP_NS}}'
-
-  wp:rbac:
-    internal: true
-    silent: true
-    desc: 'Apply WordPress RBAC'
-    deps: [wp:ns]
-    cmds:
-      - |
-        set -euo pipefail
-        export KUBECONFIG='{{.KUBECONFIG_OUT}}'
-        test -d '{{.WP_RBAC_DIR}}' || { echo "missing: {{.WP_RBAC_DIR}}" >&2; exit 1; }
-
-        kubectl -n '{{.WP_NS}}' apply -f '{{.WP_RBAC_DIR}}/10-role-wp-deployer.yaml'
-        kubectl -n '{{.WP_NS}}' apply -f '{{.WP_RBAC_DIR}}/11-rolebinding-wp-deployer.yaml'
-        kubectl -n '{{.WP_NS}}' apply -f '{{.WP_RBAC_DIR}}/20-role-wp-accessor.yaml'
-        kubectl -n '{{.WP_NS}}' apply -f '{{.WP_RBAC_DIR}}/21-rolebinding-wp-accessor.yaml'
-
-  wp:user:deployer:
-    internal: true
-    silent: true
-    desc: 'Create deployer user kubeconfig (CSR)'
-    deps: [wp:ns]
-    cmds:
-      - task: wp:csr-user
-        vars:
-          USERNAME: '{{.WP_DEPLOYER_USER}}'
-          GROUP: '{{.WP_DEPLOYER_GROUP}}'
-          OUT: '{{.WP_DEPLOYER_KUBECONFIG}}'
-
-  wp:user:accessor:
-    internal: true
-    silent: true
-    desc: 'Create accessor user kubeconfig (CSR)'
-    deps: [wp:ns]
-    cmds:
-      - task: wp:csr-user
-        vars:
-          USERNAME: '{{.WP_ACCESSOR_USER}}'
-          GROUP: '{{.WP_ACCESSOR_GROUP}}'
-          OUT: '{{.WP_ACCESSOR_KUBECONFIG}}'
-
-  wp:install:
-    internal: true
-    silent: true
-    desc: 'Install WordPress Helm chart (uses local-path StorageClass)'
-    deps: [wp:ns]
-    cmds:
-      - |
-        set -euo pipefail
-        command -v helm >/dev/null 2>&1 || { echo 'missing dependency: helm' >&2; exit 1; }
-        test -d '{{.WP_CHART}}' || { echo "missing: {{.WP_CHART}}" >&2; exit 1; }
-
-        mkdir -p '{{.STATE_DIR}}'
-        OVERRIDE='{{.STATE_DIR}}/wp-values-override.yaml'
-        cat > "$OVERRIDE" <<EOF
-        wordpress:
-          nodeSelector:
-            kubernetes.io/hostname: {{.WP_STORAGE_NODE}}
-          podSecurityContext:
-            fsGroup: {{.WP_PV_FS_GROUP}}
-          persistence:
-            storageClassName: '{{.WP_STORAGE_CLASS}}'
-            size: '{{.WP_PVC_WP_SIZE}}'
-
-        mysql:
-          nodeSelector:
-            kubernetes.io/hostname: {{.WP_STORAGE_NODE}}
-          podSecurityContext:
-            fsGroup: {{.WP_PV_FS_GROUP}}
-          persistence:
-            storageClassName: '{{.WP_STORAGE_CLASS}}'
-            size: '{{.WP_PVC_MYSQL_SIZE}}'
-        EOF
-
-        export KUBECONFIG='{{.WP_DEPLOYER_KUBECONFIG}}'
-        helm upgrade --install '{{.WP_RELEASE}}' '{{.WP_CHART}}' -n '{{.WP_NS}}' -f "$OVERRIDE"
-
-  wp:uninstall:
-    internal: true
-    silent: true
-    desc: 'Uninstall WordPress Helm release (best-effort)'
-    deps: [cluster:ready]
-    cmds:
-      - |
-        set -euo pipefail
-        command -v helm >/dev/null 2>&1 || { echo 'missing dependency: helm' >&2; exit 1; }
-        if [ -s '{{.WP_DEPLOYER_KUBECONFIG}}' ]; then
-          export KUBECONFIG='{{.WP_DEPLOYER_KUBECONFIG}}'
-          helm uninstall '{{.WP_RELEASE}}' -n '{{.WP_NS}}' >/dev/null 2>&1 || true
-        fi
-
-  wp:csr-user:
-    internal: true
-    silent: true
-    desc: 'Issue a CSR user kubeconfig in the WordPress namespace'
-    deps: [cluster:ready]
-    cmds:
-      - |
-        set -euo pipefail
-        need() { command -v "$1" >/dev/null 2>&1 || { echo "missing dependency: $1" >&2; exit 1; }; }
-        need openssl
-        need base64
-        need kubectl
-
-        export KUBECONFIG='{{.KUBECONFIG_OUT}}'
-        mkdir -p '{{.WP_USERS_DIR}}'
-
-        USER='{{.USERNAME}}'
-        GROUP='{{.GROUP}}'
-        OUT='{{.OUT}}'
-        NS='{{.WP_NS}}'
-
-        if [ -s "$OUT" ] && [ "${FORCE:-0}" != '1' ]; then
-          exit 0
-        fi
-        if [ -s "$OUT" ] && [ "${FORCE:-0}" = '1' ]; then
-          rm -f "$OUT"
-        fi
-
-        WORKDIR="$(mktemp -d)"
-        trap 'rm -rf "$WORKDIR"' EXIT
-
-        openssl genrsa -out "$WORKDIR/client.key" 2048 >/dev/null 2>&1
-        openssl req -new -key "$WORKDIR/client.key" -out "$WORKDIR/client.csr" -subj "/CN=${USER}/O=${GROUP}" >/dev/null 2>&1
-
-        CSR_B64="$(base64 < "$WORKDIR/client.csr" | tr -d '\n')"
-        CSR_NAME="csr-${USER}-${NS}"
-
-        kubectl delete csr "${CSR_NAME}" >/dev/null 2>&1 || true
-        kubectl apply -f - >/dev/null <<EOF
-        apiVersion: certificates.k8s.io/v1
-        kind: CertificateSigningRequest
-        metadata:
-          name: ${CSR_NAME}
-        spec:
-          request: ${CSR_B64}
-          signerName: kubernetes.io/kube-apiserver-client
-          usages: [client auth]
-        EOF
-
-        kubectl certificate approve "${CSR_NAME}" >/dev/null
-
-        CERT_B64=''
-        for i in $(seq 1 30); do
-          CERT_B64="$(kubectl get csr "${CSR_NAME}" -o jsonpath='{.status.certificate}' 2>/dev/null || true)"
-          if [ -n "$CERT_B64" ]; then break; fi
-          sleep 1
-        done
-        test -n "${CERT_B64:-}" || { echo "CSR did not receive a certificate: ${CSR_NAME}" >&2; exit 1; }
-        echo "$CERT_B64" | base64 -d > "$WORKDIR/client.crt"
-
-        CLUSTER_NAME="$(kubectl config view --kubeconfig='{{.KUBECONFIG_OUT}}' -o jsonpath='{.clusters[0].name}')"
-        SERVER="$(kubectl config view --kubeconfig='{{.KUBECONFIG_OUT}}' -o jsonpath='{.clusters[0].cluster.server}')"
-        CA_DATA="$(kubectl config view --kubeconfig='{{.KUBECONFIG_OUT}}' --raw -o jsonpath='{.clusters[0].cluster.certificate-authority-data}')"
-        echo "$CA_DATA" | base64 -d > "$WORKDIR/ca.crt"
-
-        kubectl config --kubeconfig="$OUT" set-cluster "$CLUSTER_NAME" --server="$SERVER" --certificate-authority="$WORKDIR/ca.crt" --embed-certs=true >/dev/null
-        kubectl config --kubeconfig="$OUT" set-credentials "$USER" --client-certificate="$WORKDIR/client.crt" --client-key="$WORKDIR/client.key" --embed-certs=true >/dev/null
-        kubectl config --kubeconfig="$OUT" set-context "${USER}@${CLUSTER_NAME}" --cluster="$CLUSTER_NAME" --user="$USER" --namespace="$NS" >/dev/null
-        kubectl config --kubeconfig="$OUT" use-context "${USER}@${CLUSTER_NAME}" >/dev/null
-
-        chmod 0600 "$OUT"
-        echo "Wrote kubeconfig: $OUT"
 

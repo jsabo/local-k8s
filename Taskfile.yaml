@@ -16,6 +16,26 @@ vars:
   K8S_VERSION_FULL: '{{default "1.34.2" .K8S_VERSION_FULL}}'
   CALICO_VERSION: '{{default "v3.31.3" .CALICO_VERSION}}'
 
+  # Gateway API CRDs (standard channel)
+  # Latest supported v1 as of Gateway API v1.4.1 (Dec 2025). Override if you want.
+  GATEWAY_API_VERSION: '{{default "1.4.1" .GATEWAY_API_VERSION}}'
+
+  # NGINX Gateway Fabric (installed via OCI chart; chart version optional)
+  GATEWAY_NS: '{{default "nginx-gateway" .GATEWAY_NS}}'
+  GATEWAY_RELEASE: '{{default "ngf" .GATEWAY_RELEASE}}'
+  GATEWAY_CHART: '{{default "oci://ghcr.io/nginx/charts/nginx-gateway-fabric" .GATEWAY_CHART}}'
+  GATEWAY_CHART_VERSION: '{{default "" .GATEWAY_CHART_VERSION}}'
+
+  # NodePort exposure (HTTP is used; HTTPS NodePort is reserved for future TLS)
+  GATEWAY_NODEPORT_HTTP: '{{default "30080" .GATEWAY_NODEPORT_HTTP}}'
+  GATEWAY_NODEPORT_HTTPS: '{{default "30443" .GATEWAY_NODEPORT_HTTPS}}'
+
+  # The GatewayClass name NGF creates by default.
+  GATEWAY_CLASS: '{{default "nginx" .GATEWAY_CLASS}}'
+
+  # A single shared Gateway for the demo
+  GATEWAY_NAME: '{{default "demo-gateway" .GATEWAY_NAME}}'
+
   # local-path-provisioner (dynamic local storage that cleans up on Delete)
   LOCAL_PATH_VERSION: '{{default "v0.0.33" .LOCAL_PATH_VERSION}}'
   LOCAL_PATH_NS: '{{default "local-path-storage" .LOCAL_PATH_NS}}'
@@ -30,11 +50,17 @@ vars:
   SERVICE_CIDR: '{{default "10.49.0.0/16" .SERVICE_CIDR}}'
   DNS_DOMAIN: '{{default "cluster.local" .DNS_DOMAIN}}'
 
+  # Demo base domain (host routing)
+  EDGE_HOST: '{{default "local.k8s" .EDGE_HOST}}'
+
+  # Derived hostnames
+  HEADLAMP_HOST: 'headlamp.{{.EDGE_HOST}}'
+  WHISKER_HOST: 'whisker.{{.EDGE_HOST}}'
+
   # -------------------------------------------------------------------
   # Local state / cloud-init
   # -------------------------------------------------------------------
   # IMPORTANT: Anchor these to the Taskfile directory so STATE_DIR never becomes "/"
-  # (which caused: touch: /.local-path-*.installed: Read-only file system)
   STATE_DIR: '{{.TASKFILE_DIR}}/.state'
   CLOUD_INIT_TEMPLATE: '{{.TASKFILE_DIR}}/cloud-init.tftpl'
   CLOUD_INIT_RENDERED: '{{.STATE_DIR}}/cloud-init.yaml'
@@ -42,11 +68,9 @@ vars:
   AUDIT_POLICY_TEMPLATE: '{{.TASKFILE_DIR}}/audit-policy.tftpl'
   AUDIT_POLICY_RENDERED: '{{.STATE_DIR}}/audit-policy.yaml'
 
-  # kubeadm config is now managed outside cloud-init (like audit-policy)
   KUBEADM_CONFIG_TEMPLATE: '{{.TASKFILE_DIR}}/kubeadm-config.tftpl'
   KUBEADM_CONFIG_RENDERED: '{{.STATE_DIR}}/kubeadm-config.yaml'
 
-  # Calico Installation/APIServer custom resources are now templated + rendered like the above.
   CALICO_CUSTOM_RESOURCES_TEMPLATE: '{{.TASKFILE_DIR}}/calico-custom-resources.tftpl'
   CALICO_CUSTOM_RESOURCES_RENDERED: '{{.STATE_DIR}}/calico-custom-resources.yaml'
 
@@ -56,8 +80,9 @@ vars:
   HEADLAMP_MANIFEST_TEMPLATE: '{{.TASKFILE_DIR}}/headlamp.tftpl'
   HEADLAMP_MANIFEST_RENDERED: '{{.STATE_DIR}}/headlamp.yaml'
 
-  INGRESS_RULES_TEMPLATE: '{{.TASKFILE_DIR}}/ingress.tftpl'
-  INGRESS_RULES_RENDERED: '{{.STATE_DIR}}/ingress.yaml'
+  # Gateway API template (replaces Ingress template)
+  GATEWAY_RULES_TEMPLATE: '{{.TASKFILE_DIR}}/gateway.tftpl'
+  GATEWAY_RULES_RENDERED: '{{.STATE_DIR}}/gateway.yaml'
 
   KUBECONFIG_OUT: '{{.STATE_DIR}}/kubeconfig'
   ENV_OUT: '{{.STATE_DIR}}/env'
@@ -73,7 +98,7 @@ vars:
   # Stamp files (idempotence without noisy repeats)
   # -------------------------------------------------------------------
   CALICO_STAMP: '{{.STATE_DIR}}/.calico-{{.CALICO_VERSION}}.installed'
-  INGRESS_STAMP: '{{.STATE_DIR}}/.ingress-nginx-{{default "30080" .INGRESS_NODEPORT_HTTP}}-{{default "30443" .INGRESS_NODEPORT_HTTPS}}.installed'
+  GATEWAY_STAMP: '{{.STATE_DIR}}/.ngf-{{.GATEWAY_NODEPORT_HTTP}}-{{.GATEWAY_NODEPORT_HTTPS}}.installed'
   LOCAL_PATH_STAMP: '{{.STATE_DIR}}/.local-path-{{.LOCAL_PATH_VERSION}}.installed'
   HEADLAMP_STAMP: '{{.STATE_DIR}}/.headlamp.installed'
 
@@ -85,33 +110,14 @@ vars:
   HEADLAMP_CHART: '{{default "headlamp/headlamp" .HEADLAMP_CHART}}'
   HEADLAMP_CHART_VERSION: '{{default "" .HEADLAMP_CHART_VERSION}}'
 
-  # Match Headlamp docs by default (SA + ClusterRoleBinding to cluster-admin),
-  # but allow safer overrides:
-  #   HEADLAMP_CLUSTERROLE=view
-  #   HEADLAMP_TOKEN_DURATION=15m
   HEADLAMP_SA: '{{default "headlamp-admin" .HEADLAMP_SA}}'
   HEADLAMP_CLUSTERROLE: '{{default "cluster-admin" .HEADLAMP_CLUSTERROLE}}'
   HEADLAMP_TOKEN_DURATION: '{{default "1h" .HEADLAMP_TOKEN_DURATION}}'
 
   # -------------------------------------------------------------------
-  # Ingress (NodePort)
-  # -------------------------------------------------------------------
-  INGRESS_NS: '{{default "ingress-nginx" .INGRESS_NS}}'
-  INGRESS_RELEASE: '{{default "ingress-nginx" .INGRESS_RELEASE}}'
-  INGRESS_CHART: '{{default "ingress-nginx/ingress-nginx" .INGRESS_CHART}}'
-  INGRESS_CHART_VERSION: '{{default "" .INGRESS_CHART_VERSION}}'
-  INGRESS_NODEPORT_HTTP: '{{default "30080" .INGRESS_NODEPORT_HTTP}}'
-  INGRESS_NODEPORT_HTTPS: '{{default "30443" .INGRESS_NODEPORT_HTTPS}}'
-  INGRESS_HOST: '{{default "local.k8s" .INGRESS_HOST}}'
-
-  # Hostname-per-app (derived from INGRESS_HOST)
-  HEADLAMP_HOST: 'headlamp.{{.INGRESS_HOST}}'
-
-  # -------------------------------------------------------------------
-  # Calico Whisker exposure (Ingress)
+  # Calico Whisker namespace
   # -------------------------------------------------------------------
   WHISKER_NS: '{{default "calico-system" .WHISKER_NS}}'
-  WHISKER_HOST: 'whisker.{{.INGRESS_HOST}}'
 
 tasks:
   # =====================================================================
@@ -190,13 +196,13 @@ tasks:
         KUBECONFIG='{{.KUBECONFIG_OUT}}' kubectl get nodes -o wide
 
   demo:install:
-    desc: 'Install demo (cluster + storage + Headlamp + ingress) and print URLs'
+    desc: 'Install demo (cluster + storage + Headlamp + Gateway API exposure) and print URLs'
     silent: true
     cmds:
       - task: cluster:up
       - task: storage:local-path:install
       - task: apps:headlamp:install
-      - task: apps:ingress:install
+      - task: apps:gateway:install
       - task: demo:info
 
   demo:uninstall:
@@ -204,7 +210,7 @@ tasks:
     silent: true
     deps: [cluster:ready]
     cmds:
-      - task: apps:ingress:uninstall
+      - task: apps:gateway:uninstall
       - task: apps:headlamp:uninstall
       - |
         echo '✓ demo uninstalled'
@@ -221,9 +227,9 @@ tasks:
 
         echo '✓ demo ready'
         echo
-        echo "Base domain: {{.INGRESS_HOST}}"
-        echo "• Headlamp:   http://{{.HEADLAMP_HOST}}:{{.INGRESS_NODEPORT_HTTP}}/"
-        echo "• Whisker:    http://{{.WHISKER_HOST}}:{{.INGRESS_NODEPORT_HTTP}}/"
+        echo "Base domain: {{.EDGE_HOST}}"
+        echo "• Headlamp:   http://{{.HEADLAMP_HOST}}:{{.GATEWAY_NODEPORT_HTTP}}/"
+        echo "• Whisker:    http://{{.WHISKER_HOST}}:{{.GATEWAY_NODEPORT_HTTP}}/"
         echo
         echo "Headlamp token (duration: {{.HEADLAMP_TOKEN_DURATION}}):"
         kubectl -n '{{.HEADLAMP_NS}}' create token '{{.HEADLAMP_SA}}' --duration='{{.HEADLAMP_TOKEN_DURATION}}'
@@ -313,7 +319,6 @@ tasks:
     cmds:
       - |
         set -euo pipefail
-        # Guard: ensure state dir is never "/" (macOS root is read-only)
         test -n '{{.STATE_DIR}}'
         test '{{.STATE_DIR}}' != '/'
         mkdir -p '{{.STATE_DIR}}'
@@ -348,31 +353,31 @@ tasks:
   # Apps (kept internal; demo:* drives them)
   # -------------------------------------------------------------------
 
-  apps:ingress:install:
+  apps:gateway:install:
     internal: true
     silent: true
-    desc: 'Install ingress-nginx (NodePort) and apply ingress rules (waits for webhook ready)'
+    desc: 'Install Gateway API (CRDs + NGF) and apply Gateway/HTTPRoutes'
     deps: [cluster:ready]
     cmds:
-      - task: ingress:controller:install
-      - task: ingress:rules:apply
-      - echo '✓ ingress installed (controller + rules)'
+      - task: gateway:controller:install
+      - task: gateway:routes:apply
+      - echo '✓ gateway installed (controller + routes)'
 
-  apps:ingress:uninstall:
+  apps:gateway:uninstall:
     internal: true
     silent: true
-    desc: 'Remove ingress rules + uninstall ingress-nginx'
+    desc: 'Remove Gateway/HTTPRoutes + uninstall NGF (best-effort)'
     deps: [cluster:ready]
     cmds:
-      - task: ingress:rules:delete
+      - task: gateway:routes:delete
       - |
         set -euo pipefail
         command -v helm >/dev/null 2>&1 || { echo 'missing dependency: helm' >&2; exit 1; }
         export KUBECONFIG='{{.KUBECONFIG_OUT}}'
-        helm uninstall '{{.INGRESS_RELEASE}}' -n '{{.INGRESS_NS}}' >/dev/null 2>&1 || true
-        kubectl delete ns '{{.INGRESS_NS}}' >/dev/null 2>&1 || true
-        rm -f '{{.INGRESS_STAMP}}' >/dev/null 2>&1 || true
-        echo '✓ ingress removed (best-effort)'
+        helm uninstall '{{.GATEWAY_RELEASE}}' -n '{{.GATEWAY_NS}}' >/dev/null 2>&1 || true
+        kubectl delete ns '{{.GATEWAY_NS}}' >/dev/null 2>&1 || true
+        rm -f '{{.GATEWAY_STAMP}}' >/dev/null 2>&1 || true
+        echo '✓ gateway removed (best-effort)'
 
   apps:headlamp:install:
     internal: true
@@ -390,7 +395,6 @@ tasks:
         helm repo add headlamp https://kubernetes-sigs.github.io/headlamp/ >/dev/null 2>&1 || true
         helm repo update >/dev/null 2>&1 || true
 
-        # kube-system should exist; create anyway just in case user overrides HEADLAMP_NS
         kubectl get ns '{{.HEADLAMP_NS}}' >/dev/null 2>&1 || kubectl create ns '{{.HEADLAMP_NS}}'
 
         if [ -n '{{.HEADLAMP_CHART_VERSION}}' ]; then
@@ -401,17 +405,13 @@ tasks:
             -n '{{.HEADLAMP_NS}}'
         fi
 
-        # Create a ServiceAccount for Headlamp token login.
         kubectl -n '{{.HEADLAMP_NS}}' get sa '{{.HEADLAMP_SA}}' >/dev/null 2>&1 || \
           kubectl -n '{{.HEADLAMP_NS}}' create serviceaccount '{{.HEADLAMP_SA}}' >/dev/null
 
-        # Apply the rendered ClusterRoleBinding (from .state/)
         kubectl apply -f '{{.HEADLAMP_MANIFEST_RENDERED}}' >/dev/null
 
         echo 'Waiting for Headlamp deployments to become Available...'
         kubectl -n '{{.HEADLAMP_NS}}' wait --for=condition=Available deploy -l app.kubernetes.io/instance='{{.HEADLAMP_RELEASE}}' --timeout=300s >/dev/null 2>&1 || true
-
-        # If label-based wait didn't match, fall back to a best-effort wait on any deploy named like the release.
         kubectl -n '{{.HEADLAMP_NS}}' wait --for=condition=Available deploy/'{{.HEADLAMP_RELEASE}}' --timeout=300s >/dev/null 2>&1 || true
 
         mkdir -p '{{.STATE_DIR}}'
@@ -462,7 +462,7 @@ tasks:
         test -f '{{.KUBEADM_CONFIG_TEMPLATE}}' || { echo "missing: {{.KUBEADM_CONFIG_TEMPLATE}}" >&2; exit 1; }
         test -f '{{.CALICO_CUSTOM_RESOURCES_TEMPLATE}}' || { echo "missing: {{.CALICO_CUSTOM_RESOURCES_TEMPLATE}}" >&2; exit 1; }
         test -f '{{.HEADLAMP_MANIFEST_TEMPLATE}}' || { echo "missing: {{.HEADLAMP_MANIFEST_TEMPLATE}}" >&2; exit 1; }
-        test -f '{{.INGRESS_RULES_TEMPLATE}}' || { echo "missing: {{.INGRESS_RULES_TEMPLATE}}" >&2; exit 1; }
+        test -f '{{.GATEWAY_RULES_TEMPLATE}}' || { echo "missing: {{.GATEWAY_RULES_TEMPLATE}}" >&2; exit 1; }
 
   cluster:render:
     internal: true
@@ -486,19 +486,16 @@ tasks:
         K8S_MINOR='{{.K8S_VERSION_FULL}}'
         K8S_MINOR="${K8S_MINOR%.*}"
 
-        # Export variables used by rendered templates
         export kubernetes_version_full='{{.K8S_VERSION_FULL}}'
         export kubernetes_version="$K8S_MINOR"
         export pod_cidr='{{.POD_CIDR}}'
         export service_cidr='{{.SERVICE_CIDR}}'
         export dns_domain='{{.DNS_DOMAIN}}'
 
-        # Render the audit policy to a readable artifact in .state/
         cp '{{.AUDIT_POLICY_TEMPLATE}}' '{{.AUDIT_POLICY_RENDERED}}'
         test -s '{{.AUDIT_POLICY_RENDERED}}' || { echo "render failed: empty {{.AUDIT_POLICY_RENDERED}}" >&2; exit 1; }
         chmod 0644 '{{.AUDIT_POLICY_RENDERED}}'
 
-        # Render kubeadm config to a readable artifact in .state/ (no inline YAML in cloud-init)
         envsubst \
           '${kubernetes_version_full} ${service_cidr} ${pod_cidr} ${dns_domain}' \
           < '{{.KUBEADM_CONFIG_TEMPLATE}}' \
@@ -506,7 +503,6 @@ tasks:
         test -s '{{.KUBEADM_CONFIG_RENDERED}}' || { echo "render failed: empty {{.KUBEADM_CONFIG_RENDERED}}" >&2; exit 1; }
         chmod 0644 '{{.KUBEADM_CONFIG_RENDERED}}'
 
-        # Render Calico custom resources (Installation + APIServer) to .state/
         envsubst \
           '${pod_cidr}' \
           < '{{.CALICO_CUSTOM_RESOURCES_TEMPLATE}}' \
@@ -514,18 +510,19 @@ tasks:
         test -s '{{.CALICO_CUSTOM_RESOURCES_RENDERED}}' || { echo "render failed: empty {{.CALICO_CUSTOM_RESOURCES_RENDERED}}" >&2; exit 1; }
         chmod 0644 '{{.CALICO_CUSTOM_RESOURCES_RENDERED}}'
 
-        # Render Headlamp + Ingress grouped manifests (to .state/)
         export headlamp_ns='{{.HEADLAMP_NS}}'
         export headlamp_sa='{{.HEADLAMP_SA}}'
         export headlamp_clusterrole='{{.HEADLAMP_CLUSTERROLE}}'
         export crb_name='{{.HEADLAMP_SA}}-{{.HEADLAMP_CLUSTERROLE}}'
 
-        export ingress_ns='{{.INGRESS_NS}}'
         export whisker_ns='{{.WHISKER_NS}}'
         export headlamp_host='{{.HEADLAMP_HOST}}'
         export whisker_host='{{.WHISKER_HOST}}'
 
-        # Headlamp service name (deterministic from release name)
+        export gateway_ns='{{.GATEWAY_NS}}'
+        export gateway_name='{{.GATEWAY_NAME}}'
+        export gateway_class='{{.GATEWAY_CLASS}}'
+
         HEADLAMP_CHART_NAME='headlamp'
         if echo '{{.HEADLAMP_RELEASE}}' | grep -q "$HEADLAMP_CHART_NAME"; then
           export headlamp_svc='{{.HEADLAMP_RELEASE}}'
@@ -541,13 +538,12 @@ tasks:
         chmod 0644 '{{.HEADLAMP_MANIFEST_RENDERED}}'
 
         envsubst \
-          '${headlamp_ns} ${whisker_ns} ${ingress_ns} ${headlamp_host} ${whisker_host} ${headlamp_svc}' \
-          < '{{.INGRESS_RULES_TEMPLATE}}' \
-          > '{{.INGRESS_RULES_RENDERED}}'
-        test -s '{{.INGRESS_RULES_RENDERED}}' || { echo "render failed: empty {{.INGRESS_RULES_RENDERED}}" >&2; exit 1; }
-        chmod 0644 '{{.INGRESS_RULES_RENDERED}}'
+          '${gateway_name} ${gateway_ns} ${gateway_class} ${headlamp_ns} ${whisker_ns} ${headlamp_host} ${whisker_host} ${headlamp_svc}' \
+          < '{{.GATEWAY_RULES_TEMPLATE}}' \
+          > '{{.GATEWAY_RULES_RENDERED}}'
+        test -s '{{.GATEWAY_RULES_RENDERED}}' || { echo "render failed: empty {{.GATEWAY_RULES_RENDERED}}" >&2; exit 1; }
+        chmod 0644 '{{.GATEWAY_RULES_RENDERED}}'
 
-        # Indent all but the first line so it nests under cloud-init "content: |"
         audit_policy="$(sed '1!s/^/      /' '{{.AUDIT_POLICY_RENDERED}}')"
         kubeadm_config="$(sed '1!s/^/      /' '{{.KUBEADM_CONFIG_RENDERED}}')"
 
@@ -569,7 +565,7 @@ tasks:
         echo "Rendered: {{.KUBEADM_CONFIG_RENDERED}}"
         echo "Rendered: {{.CALICO_CUSTOM_RESOURCES_RENDERED}}"
         echo "Rendered: {{.HEADLAMP_MANIFEST_RENDERED}}"
-        echo "Rendered: {{.INGRESS_RULES_RENDERED}}"
+        echo "Rendered: {{.GATEWAY_RULES_RENDERED}}"
         echo "Using SSH key: ${KEY_FILE}"
 
   cluster:vms:
@@ -711,7 +707,7 @@ tasks:
         done
         kubectl get ns calico-system >/dev/null 2>&1 || { echo 'calico-system namespace not created' >&2; exit 1; }
 
-        echo 'Waiting for calico-node DaemonSet to be created (operator reconciliation + image pulls can take time)...'
+        echo 'Waiting for calico-node DaemonSet to be created...'
         DS_NAME=''
         for i in $(seq 1 120); do
           DS_NAME="$(kubectl -n calico-system get ds 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^calico-node' | head -n1 || true)"
@@ -734,88 +730,90 @@ tasks:
 
         echo "Waiting for ${DS_NAME} rollout..."
         kubectl -n calico-system rollout status "ds/${DS_NAME}" --timeout=600s >/dev/null
-
-        # Best-effort: kube-controllers may come up slightly later depending on images/cluster speed.
         kubectl -n calico-system rollout status deploy/calico-kube-controllers --timeout=600s >/dev/null 2>&1 || true
 
         touch '{{.CALICO_STAMP}}'
         echo '✓ calico ready'
 
   # -------------------------------------------------------------------
-  # Ingress controller + rules
+  # Gateway API (CRDs + NGF controller) + routes
   # -------------------------------------------------------------------
 
-  ingress:controller:install:
+  gateway:api:crds:install:
     internal: true
     silent: true
-    desc: 'Install ingress-nginx controller (NodePort) (idempotent via stamp)'
+    desc: 'Install Gateway API CRDs (standard channel)'
     deps: [cluster:ready]
+    cmds:
+      - |
+        set -euo pipefail
+        export KUBECONFIG='{{.KUBECONFIG_OUT}}'
+        kubectl apply --server-side=true \
+          -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/v{{.GATEWAY_API_VERSION}}/standard-install.yaml" >/dev/null
+        echo "✓ gateway-api CRDs installed (v{{.GATEWAY_API_VERSION}})"
+
+  gateway:controller:install:
+    internal: true
+    silent: true
+    desc: 'Install NGINX Gateway Fabric (NodePort) (idempotent via stamp)'
+    deps: [cluster:ready, gateway:api:crds:install]
     status:
-      - test -f '{{.INGRESS_STAMP}}'
+      - test -f '{{.GATEWAY_STAMP}}'
     cmds:
       - |
         set -euo pipefail
         command -v helm >/dev/null 2>&1 || { echo 'missing dependency: helm' >&2; exit 1; }
         export KUBECONFIG='{{.KUBECONFIG_OUT}}'
 
-        helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx >/dev/null 2>&1 || true
-        helm repo update >/dev/null 2>&1 || true
-
-        kubectl get ns '{{.INGRESS_NS}}' >/dev/null 2>&1 || kubectl create ns '{{.INGRESS_NS}}'
-
-        if [ -n '{{.INGRESS_CHART_VERSION}}' ]; then
-          helm upgrade --install '{{.INGRESS_RELEASE}}' '{{.INGRESS_CHART}}' -n '{{.INGRESS_NS}}' \
-            --version '{{.INGRESS_CHART_VERSION}}' \
-            --set controller.service.type=NodePort \
-            --set controller.service.nodePorts.http='{{.INGRESS_NODEPORT_HTTP}}' \
-            --set controller.service.nodePorts.https='{{.INGRESS_NODEPORT_HTTPS}}'
+        # Install NGF from OCI. Default chart creates LB Service; we force NodePort.
+        if [ -n '{{.GATEWAY_CHART_VERSION}}' ]; then
+          helm upgrade --install '{{.GATEWAY_RELEASE}}' '{{.GATEWAY_CHART}}' \
+            -n '{{.GATEWAY_NS}}' --create-namespace \
+            --version '{{.GATEWAY_CHART_VERSION}}' \
+            --set nginx.service.type=NodePort \
+            --set nginx.service.externalTrafficPolicy=Cluster \
+            --set-json "nginx.service.nodePorts=[{\"port\":{{.GATEWAY_NODEPORT_HTTP}},\"listenerPort\":80},{\"port\":{{.GATEWAY_NODEPORT_HTTPS}},\"listenerPort\":443}]"
         else
-          helm upgrade --install '{{.INGRESS_RELEASE}}' '{{.INGRESS_CHART}}' -n '{{.INGRESS_NS}}' \
-            --set controller.service.type=NodePort \
-            --set controller.service.nodePorts.http='{{.INGRESS_NODEPORT_HTTP}}' \
-            --set controller.service.nodePorts.https='{{.INGRESS_NODEPORT_HTTPS}}'
+          helm upgrade --install '{{.GATEWAY_RELEASE}}' '{{.GATEWAY_CHART}}' \
+            -n '{{.GATEWAY_NS}}' --create-namespace \
+            --set nginx.service.type=NodePort \
+            --set nginx.service.externalTrafficPolicy=Cluster \
+            --set-json "nginx.service.nodePorts=[{\"port\":{{.GATEWAY_NODEPORT_HTTP}},\"listenerPort\":80},{\"port\":{{.GATEWAY_NODEPORT_HTTPS}},\"listenerPort\":443}]"
         fi
 
-        echo 'Waiting for ingress-nginx controller to be Available...'
-        kubectl -n '{{.INGRESS_NS}}' wait --for=condition=Available deployment/ingress-nginx-controller --timeout=240s >/dev/null
-
-        echo 'Waiting for admission webhook endpoints (avoids connect refused)...'
-        for i in $(seq 1 60); do
-          EP="$(kubectl -n '{{.INGRESS_NS}}' get endpoints ingress-nginx-controller-admission -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || true)"
-          if [ -n "${EP:-}" ]; then break; fi
-          sleep 2
-        done
-        test -n "${EP:-}" || { echo 'admission webhook endpoint not ready' >&2; exit 1; }
+        echo 'Waiting for NGF deployment to be Available...'
+        kubectl -n '{{.GATEWAY_NS}}' wait --for=condition=Available deploy -l app.kubernetes.io/instance='{{.GATEWAY_RELEASE}}' --timeout=240s >/dev/null 2>&1 || true
 
         mkdir -p '{{.STATE_DIR}}'
-        touch '{{.INGRESS_STAMP}}'
+        touch '{{.GATEWAY_STAMP}}'
 
-        echo '✓ ingress-nginx ready'
-        kubectl -n '{{.INGRESS_NS}}' get svc -o wide
+        echo '✓ nginx gateway fabric ready'
+        kubectl -n '{{.GATEWAY_NS}}' get pods,svc -o wide
 
-  ingress:rules:apply:
+  gateway:routes:apply:
     internal: true
     silent: true
-    desc: 'Apply ingress rules for Headlamp + Whisker (from rendered .state/ingress.yaml)'
-    deps: [cluster:ready, cluster:render]
+    desc: 'Apply Gateway + HTTPRoutes (from rendered .state/gateway.yaml)'
+    deps: [cluster:ready, cluster:render, gateway:controller:install]
     cmds:
       - |
         set -euo pipefail
         export KUBECONFIG='{{.KUBECONFIG_OUT}}'
-        kubectl apply -f '{{.INGRESS_RULES_RENDERED}}' >/dev/null
-        echo '✓ ingress rules applied'
+        kubectl apply -f '{{.GATEWAY_RULES_RENDERED}}' >/dev/null
+        echo '✓ gateway routes applied'
 
-  ingress:rules:delete:
+  gateway:routes:delete:
     internal: true
     silent: true
-    desc: 'Delete ingress rules (best-effort)'
+    desc: 'Delete Gateway + HTTPRoutes (best-effort)'
     deps: [cluster:ready]
     cmds:
       - |
         set -euo pipefail
         export KUBECONFIG='{{.KUBECONFIG_OUT}}'
-        kubectl -n '{{.HEADLAMP_NS}}' delete ingress headlamp >/dev/null 2>&1 || true
-        kubectl -n '{{.WHISKER_NS}}' delete ingress whisker >/dev/null 2>&1 || true
-        kubectl -n '{{.WHISKER_NS}}' delete networkpolicy whisker-ingress-nginx >/dev/null 2>&1 || true
-        echo '✓ ingress rules deleted (best-effort)'
+        kubectl -n '{{.HEADLAMP_NS}}' delete httproute headlamp >/dev/null 2>&1 || true
+        kubectl -n '{{.WHISKER_NS}}' delete httproute whisker >/dev/null 2>&1 || true
+        kubectl -n '{{.GATEWAY_NS}}' delete gateway '{{.GATEWAY_NAME}}' >/dev/null 2>&1 || true
+        kubectl -n '{{.WHISKER_NS}}' delete networkpolicy whisker-gateway-allow >/dev/null 2>&1 || true
+        echo '✓ gateway routes deleted (best-effort)'
 

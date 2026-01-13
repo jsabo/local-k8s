@@ -1,17 +1,18 @@
-# kubeadm + Multipass demo cluster (Calico + local-path + Headlamp + Ingress + Whisker)
+# kubeadm + Multipass demo cluster (Calico + local-path + Headlamp + NGINX Gateway API + Whisker)
 
 This repo builds a **reproducible local Kubernetes cluster** using **kubeadm** on **Multipass** VMs, then installs a small “demo stack”:
 
-- **Calico** (via Tigera operator) for CNI + NetworkPolicy (and Whisker UI)
-- **Rancher local-path-provisioner** for dynamic local PVs (demo-friendly default `StorageClass`)
-- **Headlamp** (Kubernetes UI) exposed through **ingress-nginx (NodePort)**
-- **Calico Whisker** exposed through **ingress-nginx (NodePort)**
+* **Calico** (via Tigera operator) for CNI + NetworkPolicy (and Whisker UI)
+* **Rancher local-path-provisioner** for dynamic local PVs (demo-friendly default `StorageClass`)
+* **Headlamp** (Kubernetes UI) exposed through **NGINX Gateway Fabric (Gateway API)**
+* **Calico Whisker** exposed through **NGINX Gateway Fabric (Gateway API)**
 
 Designed to be:
-- **Easy to run** (single `task` command)
-- **Reproducible** (idempotent-ish tasks; state in `./.state`)
-- **Demo-friendly** (prints URLs, tokens, and `/etc/hosts` mapping)
-- **Composable** (cluster lifecycle separated from app installs)
+
+* **Easy to run** (single `task` command)
+* **Reproducible** (idempotent-ish tasks; state in `./.state`)
+* **Demo-friendly** (prints URLs, tokens, and `/etc/hosts` mapping)
+* **Composable** (cluster lifecycle separated from app installs)
 
 ---
 
@@ -19,51 +20,62 @@ Designed to be:
 
 Reviewers should be able to:
 
-- **Reproduce the cluster + demo stack** from scratch: `task demo:install`
-- **Inspect rendered artifacts** in `./.state/` (cloud-init, kubeadm config, audit policy, etc.)
-- **Access UIs** via host-based routing:
-  - Headlamp (token auth)
-  - Whisker (Calico UI)
+* **Reproduce the cluster + demo stack** from scratch: `task demo:install`
+* **Inspect rendered artifacts** in `./.state/` (cloud-init, kubeadm config, audit policy, etc.)
+* **Access UIs** via host-based routing:
+
+  * Headlamp (token auth)
+  * Whisker (Calico UI)
 
 Primary artifacts:
-- `README.md` (this document)
-- `Taskfile.yaml` (automation entrypoint)
-- `cloud-init.tftpl` (VM bootstrap)
-- `kubeadm-config.tftpl` (kubeadm config)
-- `audit-policy.tftpl` (apiserver audit policy)
-- `calico-custom-resources.tftpl` (operator CRs: Installation/APIServer/Goldmane/Whisker)
-- `headlamp.tftpl` (ClusterRoleBinding template)
-- `ingress.tftpl` (Ingress + NetworkPolicy template)
+
+* `README.md` (this document)
+* `Taskfile.yaml` (automation entrypoint)
+* `cloud-init.tftpl` (VM bootstrap)
+* `kubeadm-config.tftpl` (kubeadm config)
+* `audit-policy.tftpl` (apiserver audit policy)
+* `calico-custom-resources.tftpl` (operator CRs: Installation/APIServer/Goldmane/Whisker)
+* `headlamp.tftpl` (ClusterRoleBinding template)
+* `gateway.tftpl` (Gateway + HTTPRoute + NetworkPolicy template)
 
 ---
 
 ## What this project includes
 
 ### Cluster
-- 3-node Kubernetes cluster:
-  - 1 control-plane (`cp-0`)
-  - 2 workers (`worker-0`, `worker-1`)
-- Built with:
-  - **kubeadm**
-  - **containerd**
-  - **Calico** (via operator)
-- Local state output:
-  - `./.state/kubeconfig` (admin kubeconfig for cluster operations)
-  - `./.state/env` (helper to export `KUBECONFIG`)
-  - `./.state/*.yaml` (rendered cloud-init + config/manifests)
-  - `./.state/.<component>*.installed` (stamp files for idempotence)
+
+* 3-node Kubernetes cluster:
+
+  * 1 control-plane (`cp-0`)
+  * 2 workers (`worker-0`, `worker-1`)
+* Built with:
+
+  * **kubeadm**
+  * **containerd**
+  * **Calico** (via operator)
+* Local state output:
+
+  * `./.state/kubeconfig` (admin kubeconfig for cluster operations)
+  * `./.state/env` (helper to export `KUBECONFIG`)
+  * `./.state/*.yaml` (rendered cloud-init + config/manifests)
+  * `./.state/.<component>*.installed` (stamp files for idempotence)
 
 ### Storage
-- **Rancher local-path-provisioner**
-  - Provides a default `StorageClass` (`local-path`) suitable for demos
+
+* **Rancher local-path-provisioner**
+
+  * Provides a default `StorageClass` (`local-path`) suitable for demos
 
 ### UIs / Demo Apps
-- **Headlamp** (Helm install)
-  - Token auth using a ServiceAccount (default is cluster-admin for demo convenience; configurable)
-- **Calico Whisker** (enabled via Calico operator CR)
-- **Ingress-NGINX (NodePort)** + host-based routing:
-  - `headlamp.<base>` → Headlamp UI (HTTP NodePort)
-  - `whisker.<base>` → Whisker UI (HTTP NodePort)
+
+* **Headlamp** (Helm install)
+
+  * Token auth using a ServiceAccount (default is cluster-admin for demo convenience; configurable)
+* **Calico Whisker** (enabled via Calico operator CR)
+* **Gateway API** routing via **NGINX Gateway Fabric (NGF)** (NodePort dataplane) + host-based routing:
+
+  * `headlamp.<base>` → Headlamp UI (HTTP NodePort)
+  * `whisker.<base>` → Whisker UI (HTTP NodePort)
 
 ---
 
@@ -71,22 +83,24 @@ Primary artifacts:
 
 ### Components and flow
 
-1. Task renders templates into `./.state/` (audit policy, kubeadm config, cloud-init, Calico CRs, ingress rules)
+1. Task renders templates into `./.state/` (audit policy, kubeadm config, cloud-init, Calico CRs, **Gateway/HTTPRoutes**)
 2. Multipass launches 3 Ubuntu VMs using the rendered `cloud-init.yaml`
 3. `kubeadm init` runs on `cp-0`
 4. Workers join using a token generated on `cp-0`
 5. Calico installs cluster networking (operator + custom resources, including Whisker)
 6. local-path-provisioner installs default storage
 7. Headlamp installs via Helm + ClusterRoleBinding
-8. ingress-nginx installs via Helm, then applies ingress rules for Headlamp + Whisker
-9. `task demo:info` prints URLs, Headlamp token, and `/etc/hosts` mappings
+8. **Gateway API CRDs** are installed
+9. **NGINX Gateway Fabric** installs via Helm, exposes a **NodePort dataplane service**
+10. A **Gateway** + **HTTPRoute** objects are applied for Headlamp + Whisker
+11. `task demo:info` prints URLs, Headlamp token, and `/etc/hosts` mappings
 
-### Conceptual access path (Ingress via NodePort)
+### Conceptual access path (Gateway API via NodePort)
 
 ```mermaid
 flowchart LR
   L[Laptop]
-  H["/etc/hosts<br/>headlamp.&lt;base&gt; → &lt;cp-0 IP&gt;<br/>whisker.&lt;base&gt; → &lt;cp-0 IP&gt;"]
+  H["/etc/hosts<br/>headlamp.&lt;base&gt; → &lt;node IP&gt;<br/>whisker.&lt;base&gt; → &lt;node IP&gt;"]
   L --> H
 
   HTTP_H["http://headlamp.&lt;base&gt;:&lt;nodeport-http&gt;/"]
@@ -94,16 +108,25 @@ flowchart LR
   L --> HTTP_H
   L --> HTTP_W
 
-  IC["ingress-nginx Controller<br/>(Service: NodePort)"]
-  HTTP_H --> IC
-  HTTP_W --> IC
+  GW_SVC["NGF dataplane Service<br/>(NodePort)"]
+  HTTP_H --> GW_SVC
+  HTTP_W --> GW_SVC
 
-  HL_SVC["Service: Headlamp<br/>ns: kube-system"]
-  WK_SVC["Service: whisker<br/>ns: calico-system"]
+  GW["Gateway<br/>(Gateway API)"]
+  GW_SVC --> GW
 
-  IC -->|host: headlamp.&lt;base&gt;| HL_SVC
-  IC -->|host: whisker.&lt;base&gt;| WK_SVC
-````
+  HR_H["HTTPRoute: headlamp<br/>(ns: kube-system)"]
+  HR_W["HTTPRoute: whisker<br/>(ns: calico-system)"]
+
+  GW -->|host: headlamp.&lt;base&gt;| HR_H
+  GW -->|host: whisker.&lt;base&gt;| HR_W
+
+  HL_SVC["Service: Headlamp<br/>(ns: kube-system)"]
+  WK_SVC["Service: whisker<br/>(ns: calico-system)"]
+
+  HR_H --> HL_SVC
+  HR_W --> WK_SVC
+```
 
 ### 3-node cluster networking (Calico overlay)
 
@@ -210,7 +233,7 @@ HEADLAMP_CLUSTERROLE=view HEADLAMP_TOKEN_DURATION=15m task demo:install
 * `kubeadm-config.tftpl` — kubeadm init configuration (service/pod CIDRs + audit config)
 * `calico-custom-resources.tftpl` — Calico operator CRs (Installation/APIServer/Goldmane/Whisker)
 * `headlamp.tftpl` — ClusterRoleBinding for the Headlamp ServiceAccount
-* `ingress.tftpl` — Ingress objects for Headlamp + Whisker and a NetworkPolicy for Whisker
+* `gateway.tftpl` — **Gateway** + **HTTPRoute** objects for Headlamp + Whisker (and a NetworkPolicy for Whisker)
 * `./.state/` — generated state (kubeconfig, rendered YAML, stamps)
 
   * Safe to delete (regenerates on install)
@@ -245,7 +268,9 @@ This will:
 * install Calico
 * install local-path-provisioner
 * install Headlamp
-* install ingress-nginx + host-based rules
+* install **Gateway API CRDs**
+* install **NGINX Gateway Fabric** (NodePort dataplane)
+* apply **Gateway + HTTPRoutes** for Headlamp + Whisker
 * print URLs + a Headlamp token + `/etc/hosts` mappings
 
 ### 2) Add the host mappings
@@ -264,6 +289,9 @@ It prints lines like:
 ```
 
 Add them to `/etc/hosts` on your laptop.
+
+> Tip: The repo prints the control-plane node IP (`cp-0`) for convenience.
+> If you use `externalTrafficPolicy: Local` on the NodePort dataplane service, you may need to map to the node currently running the dataplane pod. For demos, using `externalTrafficPolicy: Cluster` is typically easiest.
 
 ### 3) Browse
 
@@ -290,12 +318,13 @@ export KUBECONFIG=./.state/kubeconfig
 kubectl get nodes -o wide
 kubectl get pods -A | head
 
-# confirm ingress service is NodePort and has the expected ports
-kubectl -n ingress-nginx get svc ingress-nginx-controller -o wide
+# confirm Gateway API objects exist
+kubectl get gatewayclass
+kubectl get gateway -A
+kubectl get httproute -A
 
-# confirm Headlamp + Whisker ingress objects exist
-kubectl -n kube-system get ingress headlamp
-kubectl -n calico-system get ingress whisker
+# confirm NGF dataplane service is NodePort and has the expected port
+kubectl -n nginx-gateway get svc demo-gateway-nginx -o wide
 ```
 
 ---
@@ -316,6 +345,7 @@ kubectl get pods -A
 ls -la ./.state/
 sed -n '1,80p' ./.state/kubeadm-config.yaml
 sed -n '1,120p' ./.state/audit-policy.yaml
+sed -n '1,160p' ./.state/gateway.yaml
 ```
 
 ### 3) Print URLs + Headlamp token
@@ -345,7 +375,7 @@ The repo uses “stamp files” under `./.state/` to avoid repeating slow/noisy 
 
 * `.calico-<version>.installed`
 * `.local-path-<version>.installed`
-* `.ingress-nginx-<ports>.installed`
+* `.ngf-<ports>.installed`
 * `.headlamp.installed`
 
 This makes repeat runs faster and less chatty, but it also means:
@@ -366,15 +396,28 @@ task demo:info
 
 Add the printed mappings to `/etc/hosts`.
 
-### Ingress works but Whisker doesn’t load
+### Gateway exists but the NodePort doesn’t respond
 
-Check that the Whisker pods/services exist and the NetworkPolicy isn’t blocking ingress-nginx:
+1. Confirm the dataplane pod is running and see which node it’s on:
+
+```bash
+export KUBECONFIG=./.state/kubeconfig
+kubectl -n nginx-gateway get pods -o wide
+kubectl -n nginx-gateway get svc demo-gateway-nginx -o wide
+```
+
+2. If the NodePort Service uses `externalTrafficPolicy: Local`, the NodePort will only answer on nodes that have a local endpoint.
+   For demo convenience, set `externalTrafficPolicy: Cluster` for the dataplane NodePort service via Helm values (recommended).
+
+### Whisker doesn’t load
+
+Check that the Whisker pods/services exist and the NetworkPolicy isn’t blocking the gateway dataplane:
 
 ```bash
 export KUBECONFIG=./.state/kubeconfig
 kubectl -n calico-system get pods,svc
-kubectl -n calico-system get networkpolicy whisker-ingress-nginx -o yaml
-kubectl -n calico-system describe ingress whisker
+kubectl -n calico-system get networkpolicy whisker-gateway-allow -o yaml
+kubectl -n calico-system describe httproute whisker
 ```
 
 ### Headlamp token login fails

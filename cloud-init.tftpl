@@ -84,7 +84,7 @@ runcmd:
   - mkdir -p /etc/containerd
   - bash -c "containerd config default > /etc/containerd/config.toml"
   - sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-  - sed -i -E 's#(^[[:space:]]*sandbox_image[[:space:]]*=[[:space:]]*\").*(\"$)#\1registry.k8s.io/pause:3.10.1\2#' /etc/containerd/config.toml
+  - sed -i -E 's#(^[[:space:]]*sandbox_image[[:space:]]*=[[:space:]]*\").*(\"$)#\1${pause_image}\2#' /etc/containerd/config.toml
   - systemctl enable containerd
   - systemctl restart containerd
 

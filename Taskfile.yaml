@@ -3,11 +3,29 @@ version: '3'
 set: [errexit, nounset, pipefail]
 
 vars:
+  # ===================================================================
+  # Variable Naming Conventions
+  # ===================================================================
+  # - Taskfile variables: UPPER_SNAKE_CASE (e.g., GATEWAY_NS)
+  # - Exported for envsubst: lower_snake_case (e.g., gateway_ns)
+  # - Template placeholders: ${lower_snake_case} via envsubst
+  #
+  # Common suffixes:
+  #   _TEMPLATE  - Source template file (.tftpl)
+  #   _RENDERED  - Output after envsubst rendering
+  #   _NS        - Kubernetes namespace
+  #   _STAMP     - Idempotence marker file
+  #   _VERSION   - Component version
+  #   _RELEASE   - Helm release name
+  # ===================================================================
+
   # -------------------------------------------------------------------
   # Cluster topology
   # -------------------------------------------------------------------
   CP0: cp-0
-  WORKERS: 'worker-0 worker-1'
+  WORKER_COUNT: '{{default "2" .WORKER_COUNT}}'
+  # WORKERS is auto-generated from WORKER_COUNT in tasks; override for custom names
+  WORKERS: '{{default "" .WORKERS}}'
   NODES: '{{.CP0}} {{.WORKERS}}'
 
   # -------------------------------------------------------------------
@@ -15,6 +33,7 @@ vars:
   # -------------------------------------------------------------------
   K8S_VERSION_FULL: '{{default "1.34.2" .K8S_VERSION_FULL}}'
   CALICO_VERSION: '{{default "v3.31.3" .CALICO_VERSION}}'
+  PAUSE_IMAGE: '{{default "registry.k8s.io/pause:3.10" .PAUSE_IMAGE}}'
 
   # Gateway API CRDs (standard channel)
   # Latest supported v1 as of Gateway API v1.4.1 (Dec 2025). Override if you want.
@@ -100,7 +119,7 @@ vars:
   CALICO_STAMP: '{{.STATE_DIR}}/.calico-{{.CALICO_VERSION}}.installed'
   GATEWAY_STAMP: '{{.STATE_DIR}}/.ngf-{{.GATEWAY_NODEPORT_HTTP}}-{{.GATEWAY_NODEPORT_HTTPS}}.installed'
   LOCAL_PATH_STAMP: '{{.STATE_DIR}}/.local-path-{{.LOCAL_PATH_VERSION}}.installed'
-  HEADLAMP_STAMP: '{{.STATE_DIR}}/.headlamp.installed'
+  HEADLAMP_STAMP: '{{.STATE_DIR}}/.headlamp-{{.HEADLAMP_RELEASE}}.installed'
 
   # -------------------------------------------------------------------
   # Demo components: Headlamp
@@ -113,6 +132,7 @@ vars:
   HEADLAMP_SA: '{{default "headlamp-admin" .HEADLAMP_SA}}'
   HEADLAMP_CLUSTERROLE: '{{default "cluster-admin" .HEADLAMP_CLUSTERROLE}}'
   HEADLAMP_TOKEN_DURATION: '{{default "1h" .HEADLAMP_TOKEN_DURATION}}'
+  HEADLAMP_SVC_PORT: '{{default "80" .HEADLAMP_SVC_PORT}}'
 
   # -------------------------------------------------------------------
   # Calico Whisker namespace
@@ -152,7 +172,17 @@ tasks:
     cmds:
       - |
         set -euo pipefail
-        for n in {{.NODES}}; do
+        # Generate node list from WORKER_COUNT if WORKERS not explicitly set
+        if [ -n '{{.WORKERS}}' ]; then
+          NODES='{{.CP0}} {{.WORKERS}}'
+        else
+          NODES='{{.CP0}}'
+          for i in $(seq 0 $(({{.WORKER_COUNT}} - 1))); do
+            NODES="${NODES} worker-${i}"
+          done
+        fi
+
+        for n in $NODES; do
           if multipass info "$n" >/dev/null 2>&1; then
             echo "Deleting $n..."
             multipass delete -p "$n" >/dev/null 2>&1 || true
@@ -168,7 +198,17 @@ tasks:
     cmds:
       - |
         set -euo pipefail
-        for n in {{.NODES}}; do
+        # Generate node list from WORKER_COUNT if WORKERS not explicitly set
+        if [ -n '{{.WORKERS}}' ]; then
+          NODES='{{.CP0}} {{.WORKERS}}'
+        else
+          NODES='{{.CP0}}'
+          for i in $(seq 0 $(({{.WORKER_COUNT}} - 1))); do
+            NODES="${NODES} worker-${i}"
+          done
+        fi
+
+        for n in $NODES; do
           if multipass info "$n" >/dev/null 2>&1; then
             echo "Deleting $n..."
             multipass delete -p "$n" >/dev/null 2>&1 || true
@@ -300,12 +340,22 @@ tasks:
     cmds:
       - |
         set -euo pipefail
-        for n in {{.NODES}}; do
+        # Generate node list from WORKER_COUNT if WORKERS not explicitly set
+        if [ -n '{{.WORKERS}}' ]; then
+          NODES='{{.CP0}} {{.WORKERS}}'
+        else
+          NODES='{{.CP0}}'
+          for i in $(seq 0 $(({{.WORKER_COUNT}} - 1))); do
+            NODES="${NODES} worker-${i}"
+          done
+        fi
+
+        for n in $NODES; do
           echo "Ensuring {{.LOCAL_PATH_DIR}} on ${n}..."
           multipass exec "$n" -- bash -lc '
             set -euo pipefail
             sudo mkdir -p "{{.LOCAL_PATH_DIR}}"
-            sudo chmod 0777 "{{.LOCAL_PATH_DIR}}"
+            sudo chmod 0755 "{{.LOCAL_PATH_DIR}}"
           '
         done
 
@@ -341,10 +391,12 @@ tasks:
 
         for sc in $(kubectl get storageclass -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
           if [ "$sc" != '{{.LOCAL_PATH_STORAGECLASS}}' ]; then
-            kubectl patch storageclass "$sc" -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' >/dev/null 2>&1 || true
+            kubectl patch storageclass "$sc" -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"false"}}}' >/dev/null 2>&1 \
+              || echo "WARNING: failed to unset default on storageclass $sc" >&2
           fi
         done
-        kubectl patch storageclass '{{.LOCAL_PATH_STORAGECLASS}}' -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' >/dev/null 2>&1 || true
+        kubectl patch storageclass '{{.LOCAL_PATH_STORAGECLASS}}' -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}' >/dev/null 2>&1 \
+          || echo "WARNING: failed to set {{.LOCAL_PATH_STORAGECLASS}} as default storageclass" >&2
 
         touch '{{.LOCAL_PATH_STAMP}}'
         echo "✓ local-path-provisioner ready (default StorageClass: {{.LOCAL_PATH_STORAGECLASS}})"
@@ -369,7 +421,7 @@ tasks:
     desc: 'Remove Gateway/HTTPRoutes + uninstall NGF (best-effort)'
     deps: [cluster:ready]
     cmds:
-      - task: gateway:routes:delete
+      - task: gateway:routes:uninstall
       - |
         set -euo pipefail
         command -v helm >/dev/null 2>&1 || { echo 'missing dependency: helm' >&2; exit 1; }
@@ -392,8 +444,10 @@ tasks:
         command -v helm >/dev/null 2>&1 || { echo 'missing dependency: helm' >&2; exit 1; }
         export KUBECONFIG='{{.KUBECONFIG_OUT}}'
 
-        helm repo add headlamp https://kubernetes-sigs.github.io/headlamp/ >/dev/null 2>&1 || true
-        helm repo update >/dev/null 2>&1 || true
+        helm repo add headlamp https://kubernetes-sigs.github.io/headlamp/ >/dev/null 2>&1 \
+          || echo 'WARNING: helm repo add failed (may already exist or network issue)' >&2
+        helm repo update >/dev/null 2>&1 \
+          || echo 'WARNING: helm repo update failed (network issue or no repos configured)' >&2
 
         kubectl get ns '{{.HEADLAMP_NS}}' >/dev/null 2>&1 || kubectl create ns '{{.HEADLAMP_NS}}'
 
@@ -529,6 +583,7 @@ tasks:
         else
           export headlamp_svc='{{.HEADLAMP_RELEASE}}-headlamp'
         fi
+        export headlamp_svc_port='{{.HEADLAMP_SVC_PORT}}'
 
         envsubst \
           '${crb_name} ${headlamp_clusterrole} ${headlamp_sa} ${headlamp_ns}' \
@@ -538,7 +593,7 @@ tasks:
         chmod 0644 '{{.HEADLAMP_MANIFEST_RENDERED}}'
 
         envsubst \
-          '${gateway_name} ${gateway_ns} ${gateway_class} ${headlamp_ns} ${whisker_ns} ${headlamp_host} ${whisker_host} ${headlamp_svc}' \
+          '${gateway_name} ${gateway_ns} ${gateway_class} ${headlamp_ns} ${whisker_ns} ${headlamp_host} ${whisker_host} ${headlamp_svc} ${headlamp_svc_port}' \
           < '{{.GATEWAY_RULES_TEMPLATE}}' \
           > '{{.GATEWAY_RULES_RENDERED}}'
         test -s '{{.GATEWAY_RULES_RENDERED}}' || { echo "render failed: empty {{.GATEWAY_RULES_RENDERED}}" >&2; exit 1; }
@@ -550,9 +605,10 @@ tasks:
         export ssh_key="$SSH_KEY"
         export audit_policy
         export kubeadm_config
+        export pause_image='{{.PAUSE_IMAGE}}'
 
         envsubst \
-          '${ssh_key} ${kubernetes_version_full} ${kubernetes_version} ${pod_cidr} ${service_cidr} ${dns_domain} ${audit_policy} ${kubeadm_config}' \
+          '${ssh_key} ${kubernetes_version_full} ${kubernetes_version} ${pod_cidr} ${service_cidr} ${dns_domain} ${audit_policy} ${kubeadm_config} ${pause_image}' \
           < '{{.CLOUD_INIT_TEMPLATE}}' \
           > '{{.CLOUD_INIT_RENDERED}}'
 
@@ -597,10 +653,21 @@ tasks:
           echo "✓ launched: $name"
         }
 
+        # Generate worker names from WORKER_COUNT if WORKERS not explicitly set
+        if [ -n '{{.WORKERS}}' ]; then
+          WORKERS='{{.WORKERS}}'
+        else
+          WORKERS=''
+          for i in $(seq 0 $(({{.WORKER_COUNT}} - 1))); do
+            WORKERS="${WORKERS} worker-${i}"
+          done
+        fi
+
         echo 'Launching VMs (idempotent)...'
         launch '{{.CP0}}'
-        launch 'worker-0'
-        launch 'worker-1'
+        for w in $WORKERS; do
+          launch "$w"
+        done
         multipass list
 
   cluster:init:
@@ -616,10 +683,6 @@ tasks:
         echo 'Initializing control-plane on {{.CP0}}...'
         multipass exec '{{.CP0}}' -- bash -lc '
           set -euo pipefail
-          IP="$(ip -4 route get 1.1.1.1 | awk "{print \$7; exit}")"
-          if grep -q "__CP0_ADVERTISE_ADDRESS__" /etc/kubernetes/kubeadm-config.yaml; then
-            sudo sed -i "s/__CP0_ADVERTISE_ADDRESS__/${IP}/g" /etc/kubernetes/kubeadm-config.yaml
-          fi
           sudo kubeadm init --config /etc/kubernetes/kubeadm-config.yaml
           echo "✓ initialized"
         '
@@ -642,7 +705,17 @@ tasks:
             >/dev/null 2>&1
         }
 
-        for w in {{.WORKERS}}; do
+        # Generate worker names from WORKER_COUNT if WORKERS not explicitly set
+        if [ -n '{{.WORKERS}}' ]; then
+          WORKERS='{{.WORKERS}}'
+        else
+          WORKERS=''
+          for i in $(seq 0 $(({{.WORKER_COUNT}} - 1))); do
+            WORKERS="${WORKERS} worker-${i}"
+          done
+        fi
+
+        for w in $WORKERS; do
           if joined_worker "$w"; then
             echo "✓ already joined: $w"
             continue
@@ -703,6 +776,7 @@ tasks:
         echo 'Waiting for calico-system namespace...'
         for i in $(seq 1 90); do
           if kubectl get ns calico-system >/dev/null 2>&1; then break; fi
+          if [ $((i % 10)) -eq 0 ]; then echo "  still waiting for calico-system namespace... (${i}s)"; fi
           sleep 2
         done
         kubectl get ns calico-system >/dev/null 2>&1 || { echo 'calico-system namespace not created' >&2; exit 1; }
@@ -712,6 +786,7 @@ tasks:
         for i in $(seq 1 120); do
           DS_NAME="$(kubectl -n calico-system get ds 2>/dev/null | awk 'NR>1 {print $1}' | grep -E '^calico-node' | head -n1 || true)"
           if [ -n "${DS_NAME:-}" ]; then break; fi
+          if [ $((i % 10)) -eq 0 ]; then echo "  still waiting for calico-node DaemonSet... ($((i*2))s)"; fi
           sleep 2
         done
 
@@ -739,7 +814,7 @@ tasks:
   # Gateway API (CRDs + NGF controller) + routes
   # -------------------------------------------------------------------
 
-  gateway:api:crds:install:
+  gateway:crds:install:
     internal: true
     silent: true
     desc: 'Install Gateway API CRDs (standard channel)'
@@ -756,7 +831,7 @@ tasks:
     internal: true
     silent: true
     desc: 'Install NGINX Gateway Fabric (NodePort) (idempotent via stamp)'
-    deps: [cluster:ready, gateway:api:crds:install]
+    deps: [cluster:ready, gateway:crds:install]
     status:
       - test -f '{{.GATEWAY_STAMP}}'
     cmds:
@@ -802,10 +877,10 @@ tasks:
         kubectl apply -f '{{.GATEWAY_RULES_RENDERED}}' >/dev/null
         echo '✓ gateway routes applied'
 
-  gateway:routes:delete:
+  gateway:routes:uninstall:
     internal: true
     silent: true
-    desc: 'Delete Gateway + HTTPRoutes (best-effort)'
+    desc: 'Uninstall Gateway + HTTPRoutes (best-effort)'
     deps: [cluster:ready]
     cmds:
       - |
